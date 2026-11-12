@@ -1,0 +1,11 @@
+{
+    "name": "invoice-ocr",
+    "version": "1.0.0",
+    "description": "Browser-based OCR that turns invoice images and PDFs into JSON",
+    "private": true,
+    "type": "commonjs",
+    "main": "server.js",
+    "engines": {
+        "node": ">=20"
+    }
+}

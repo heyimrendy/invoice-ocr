@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Invoice to JSON</title>
+    <style>
+        :root {
+            --bg: #f5f6f8;
+            --surface: #ffffff;
+            --text: #1b1f24;
+            --muted: #667085;
+            --border: #d9dde3;
+            --accent: #2457d6;
+            --accent-text: #ffffff;
+            --warn-bg: #fff6e0;
+            --warn-text: #7a5200;
+            --error: #b42318;
+            --code-bg: #0f172a;
+            --code-text: #e2e8f0;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #12151a;
+                --surface: #1a1e25;
+                --text: #e6e9ee;
+                --muted: #98a2b3;
+                --border: #2d333d;
+                --accent: #6b93f5;
+                --accent-text: #0b1220;
+                --warn-bg: #3a2e12;
+                --warn-text: #f5d48a;
+                --error: #f97066;
+                --code-bg: #0b0e13;
+                --code-text: #d5dbe5;
+            }
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        }
+
+        main {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 24px 16px 48px;
+        }
+
+        h1 { margin: 0 0 4px; font-size: 1.6rem; }
+        h2 { margin: 0; font-size: 1rem; }
+        .lead { margin: 0 0 20px; color: var(--muted); }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .drop {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            min-height: 140px;
+            border: 2px dashed var(--border);
+            border-radius: 10px;
+            text-align: center;
+            cursor: pointer;
+            padding: 16px;
+        }
+        .drop:hover, .drop:focus-visible, .drop.over {
+            border-color: var(--accent);
+            outline: none;
+        }
+        .drop strong { font-size: 1.05rem; }
+        .drop span { color: var(--muted); font-size: 0.9rem; }
+        .drop img {
+            max-height: 120px;
+            max-width: 100%;
+            border-radius: 6px;
+            margin-top: 8px;
+        }
+
+        .scan-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px 12px;
+            align-items: center;
+            margin-top: 12px;
+        }
+
+        .camera {
+            margin-top: 12px;
+            padding: 12px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+        }
+        .camera video {
+            display: block;
+            width: 100%;
+            max-height: 60vh;
+            background: #000;
+            border-radius: 8px;
+            object-fit: contain;
+        }
+        .camera-status {
+            margin: 8px 0 0;
+            font-size: 0.9rem;
+            color: var(--muted);
+        }
+        .camera-status.error { color: var(--error); }
+        .camera-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        .camera .hint { margin: 8px 0 0; }
+
+        .options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px 16px;
+            margin-top: 16px;
+            align-items: end;
+        }
+        .options label {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            font-size: 0.85rem;
+            color: var(--muted);
+        }
+        select, input[type="text"] {
+            font: inherit;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 8px 10px;
+            min-width: 0;
+        }
+        #currency { width: 110px; text-transform: uppercase; }
+
+        button {
+            font: inherit;
+            font-size: 0.9rem;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 7px 12px;
+            cursor: pointer;
+        }
+        button:hover { border-color: var(--accent); }
+        button:disabled { opacity: 0.55; cursor: not-allowed; }
+        button:disabled:hover { border-color: var(--border); }
+        button.primary:disabled:hover { border-color: var(--accent); }
+        button.primary {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--accent-text);
+        }
+        button.link {
+            border: 0;
+            background: none;
+            color: var(--accent);
+            padding: 0;
+            text-decoration: underline;
+        }
+
+        .status { margin-top: 16px; }
+        .bar {
+            height: 8px;
+            border-radius: 4px;
+            background: var(--border);
+            overflow: hidden;
+        }
+        #bar-fill {
+            height: 100%;
+            width: 0;
+            background: var(--accent);
+            transition: width 0.2s;
+        }
+        #status-text { margin: 6px 0 0; font-size: 0.9rem; color: var(--muted); }
+        #status-text.error { color: var(--error); }
+
+        .grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
+        .grid .card { margin: 0; min-width: 0; }
+        @media (min-width: 900px) {
+            .grid { grid-template-columns: 1fr 1fr; }
+        }
+
+        .card-head {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .actions { display: flex; gap: 8px; }
+        .hint { font-size: 0.8rem; color: var(--muted); }
+
+        #warnings {
+            margin: 0 0 12px;
+            padding: 10px 12px 10px 28px;
+            background: var(--warn-bg);
+            color: var(--warn-text);
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+
+        pre, textarea {
+            width: 100%;
+            margin: 0;
+            border-radius: 8px;
+            font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+        pre {
+            background: var(--code-bg);
+            color: var(--code-text);
+            padding: 12px;
+            max-height: 560px;
+            overflow: auto;
+        }
+        textarea {
+            min-height: 360px;
+            height: 560px;
+            resize: vertical;
+            padding: 12px;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--border);
+        }
+
+        [hidden] { display: none !important; }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>Invoice to JSON</h1>
+        <p class="lead">Drop an invoice (image or PDF) or scan it with your camera. Text is read in your browser with Tesseract.js, so the file never leaves your device.</p>
+
+        <section class="card">
+            <div id="drop" class="drop" role="button" tabindex="0" aria-label="Choose an invoice file">
+                <strong>Drop an invoice here, or click to choose</strong>
+                <span>JPG, PNG, WebP or PDF. You can also paste an image.</span>
+                <img id="preview" alt="Invoice preview" hidden>
+            </div>
+            <input id="file" type="file" accept="image/*,application/pdf" hidden>
+
+            <div class="scan-row">
+                <button id="scan" type="button" class="primary">Scan invoice</button>
+                <span class="hint">Use your camera for a live preview and capture</span>
+            </div>
+
+            <section id="camera" class="camera" aria-label="Camera scan" hidden>
+                <video id="camera-video" muted autoplay playsinline></video>
+                <p id="camera-status" class="camera-status" role="status"></p>
+                <div class="camera-actions">
+                    <button id="capture" type="button" class="primary" disabled>Capture</button>
+                    <button id="camera-cancel" type="button">Cancel</button>
+                </div>
+                <p class="hint">Fill the frame with the invoice and hold steady. Capture uses the full camera image.</p>
+            </section>
+
+            <div class="options">
+                <label>Language
+                    <select id="lang">
+                        <option value="eng+ind" selected>English + Indonesian</option>
+                        <option value="eng">English</option>
+                        <option value="ind">Indonesian</option>
+                    </select>
+                </label>
+                <label>Date format
+                    <select id="date-order">
+                        <option value="dmy" selected>Day/Month/Year</option>
+                        <option value="mdy">Month/Day/Year</option>
+                    </select>
+                </label>
+                <label>Currency (blank = detect)
+                    <input id="currency" type="text" maxlength="3" placeholder="IDR" autocomplete="off">
+                </label>
+                <button id="sample" class="link" type="button">Try sample text</button>
+            </div>
+
+            <div id="status" class="status" hidden>
+                <div class="bar"><div id="bar-fill"></div></div>
+                <p id="status-text" role="status"></p>
+            </div>
+        </section>
+
+        <section id="result" class="grid" hidden>
+            <div class="card">
+                <div class="card-head">
+                    <h2>JSON</h2>
+                    <div class="actions">
+                        <button id="copy" type="button">Copy</button>
+                        <button id="download" type="button" class="primary">Download</button>
+                    </div>
+                </div>
+                <ul id="warnings" hidden></ul>
+                <pre id="json"></pre>
+            </div>
+            <div class="card">
+                <div class="card-head">
+                    <h2>Recognized text</h2>
+                    <span class="hint">Fix OCR mistakes here and the JSON updates live</span>
+                </div>
+                <textarea id="text" spellcheck="false"></textarea>
+            </div>
+        </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+    <script src="merchants/tokopedia.js"></script>
+    <script src="invoice-parser.js"></script>
+    <script>
+        (() => {
+            'use strict';
+
+            const PDFJS_BASE = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/';
+            const MAX_PDF_PAGES = 10;
+            const MIN_TEXT_LAYER_CHARS = 40;
+
+            const SAMPLE = [
+                'ACME Supplies Ltd.',
+                '123 Market Street, Springfield',
+                'INVOICE',
+                'Invoice No: INV-2026-0042',
+                'Invoice Date: November 3, 2026',
+                'Due Date: December 3, 2026',
+                '',
+                'Bill To:',
+                'Globex Corporation',
+                '',
+                'Description Qty Unit Price Amount',
+                'Widget A 10 $12.50 $125.00',
+                'Widget B (large) 2 $99.99 $199.98',
+                'Installation service 1 $150.00 $150.00',
+                'Subtotal $474.98',
+                'Tax (10%) $47.50',
+                'Shipping $20.00',
+                'Total $542.48',
+            ].join('\n');
+
+            const $ = (id) => document.getElementById(id);
+            const el = {
+                drop: $('drop'),
+                file: $('file'),
+                preview: $('preview'),
+                scan: $('scan'),
+                camera: $('camera'),
+                cameraVideo: $('camera-video'),
+                cameraStatus: $('camera-status'),
+                capture: $('capture'),
+                cameraCancel: $('camera-cancel'),
+                lang: $('lang'),
+                dateOrder: $('date-order'),
+                currency: $('currency'),
+                sample: $('sample'),
+                status: $('status'),
+                barFill: $('bar-fill'),
+                statusText: $('status-text'),
+                result: $('result'),
+                warnings: $('warnings'),
+                json: $('json'),
+                text: $('text'),
+                copy: $('copy'),
+                download: $('download'),
+            };
+
+            let busy = false;
+            let currentName = 'invoice';
+            let previewUrl = null;
+            let cameraSession = null;
+            let capturing = false;
+
+            // ---------------------------------------------------------------
+            // Progress
+            // ---------------------------------------------------------------
+
+            function setProgress(fraction, message, isError = false) {
+                el.status.hidden = false;
+                el.barFill.style.width = `${Math.round(Math.max(0, Math.min(1, fraction)) * 100)}%`;
+                el.statusText.textContent = message;
+                el.statusText.classList.toggle('error', isError);
+            }
+
+            // ---------------------------------------------------------------
+            // Tesseract
+            // ---------------------------------------------------------------
+
+            let worker = null;
+            let workerLang = '';
+            let onProgress = () => {};
+
+            async function getWorker(lang) {
+                if (worker && workerLang === lang) {
+                    return worker;
+                }
+                if (worker) {
+                    await worker.terminate();
+                    worker = null;
+                }
+                if (typeof Tesseract === 'undefined') {
+                    throw new Error('Could not load Tesseract.js. Check your internet connection and reload.');
+                }
+                worker = await Tesseract.createWorker(lang, 1, {
+                    logger: (m) => onProgress(m),
+                });
+                workerLang = lang;
+                return worker;
+            }
+
+            // ---------------------------------------------------------------
+            // Image preparation
+            // ---------------------------------------------------------------
+
+            /** Scales to roughly 300 DPI for an A4 page and paints transparency white. */
+            async function imageToCanvas(blob) {
+                const bitmap = await createImageBitmap(blob);
+                const scale = Math.min(2.5, Math.max(0.5, 3000 / Math.max(bitmap.width, bitmap.height)));
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.round(bitmap.width * scale);
+                canvas.height = Math.round(bitmap.height * scale);
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                bitmap.close();
+                return canvas;
+            }
+
+            /** Grayscale plus a percentile contrast stretch, which helps with photos and faint scans. */
+            function enhance(canvas) {
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                const d = image.data;
+                const hist = new Uint32Array(256);
+                for (let i = 0; i < d.length; i += 4) {
+                    const g = ((d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000) | 0;
+                    d[i] = g;
+                    d[i + 1] = g;
+                    d[i + 2] = g;
+                    hist[g]++;
+                }
+                const cut = (d.length / 4) * 0.01;
+                let lo = 0;
+                let hi = 255;
+                let acc = 0;
+                for (let v = 0; v < 256; v++) {
+                    acc += hist[v];
+                    if (acc >= cut) {
+                        lo = v;
+                        break;
+                    }
+                }
+                acc = 0;
+                for (let v = 255; v >= 0; v--) {
+                    acc += hist[v];
+                    if (acc >= cut) {
+                        hi = v;
+                        break;
+                    }
+                }
+                if (hi - lo >= 32) {
+                    const range = hi - lo;
+                    for (let i = 0; i < d.length; i += 4) {
+                        const v = Math.max(0, Math.min(255, ((d[i] - lo) * 255) / range));
+                        d[i] = v;
+                        d[i + 1] = v;
+                        d[i + 2] = v;
+                    }
+                }
+                ctx.putImageData(image, 0, 0);
+            }
+
+            // ---------------------------------------------------------------
+            // PDF
+            // ---------------------------------------------------------------
+
+            let pdfjsPromise = null;
+
+            function loadPdfJs() {
+                if (!pdfjsPromise) {
+                    pdfjsPromise = (async () => {
+                        const lib = await import(`${PDFJS_BASE}pdf.min.mjs`);
+                        // Workers must be same-origin, so wrap the CDN worker in a blob.
+                        const code = await (await fetch(`${PDFJS_BASE}pdf.worker.min.mjs`)).text();
+                        lib.GlobalWorkerOptions.workerSrc = URL.createObjectURL(
+                            new Blob([code], { type: 'text/javascript' }),
+                        );
+                        return lib;
+                    })();
+                    pdfjsPromise.catch(() => {
+                        pdfjsPromise = null;
+                    });
+                }
+                return pdfjsPromise;
+            }
+
+            /** Rebuilds lines from the positioned text items of a digital (non-scanned) PDF. */
+            function textContentToLines(content) {
+                const rows = [];
+                for (const item of content.items) {
+                    if (!('str' in item) || !item.str.trim()) {
+                        continue;
+                    }
+                    const x = item.transform[4];
+                    const y = item.transform[5];
+                    let row = rows.find((r) => Math.abs(r.y - y) < 3);
+                    if (!row) {
+                        row = { y, parts: [] };
+                        rows.push(row);
+                    }
+                    row.parts.push({ x, str: item.str.trim() });
+                }
+                rows.sort((a, b) => b.y - a.y);
+                return rows
+                    .map((r) => r.parts.sort((a, b) => a.x - b.x).map((p) => p.str).join('  '))
+                    .join('\n');
+            }
+
+            // ---------------------------------------------------------------
+            // Main flow
+            // ---------------------------------------------------------------
+
+            async function ocrCanvas(canvas, lang, step, steps) {
+                onProgress = (m) => {
+                    if (m.status === 'recognizing text') {
+                        const pct = Math.round(m.progress * 100);
+                        const page = steps > 1 ? ` (page ${step + 1} of ${steps})` : '';
+                        setProgress((step + m.progress) / steps, `Reading text${page}… ${pct}%`);
+                    } else {
+                        const label = String(m.status || 'Working');
+                        setProgress(step / steps, `${label.charAt(0).toUpperCase()}${label.slice(1)}…`);
+                    }
+                };
+                const w = await getWorker(lang);
+                const { data } = await w.recognize(canvas);
+                return data.text;
+            }
+
+            async function readPdf(file, lang) {
+                setProgress(0, 'Opening PDF…');
+                const pdfjs = await loadPdfJs();
+                const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+                const pages = Math.min(pdf.numPages, MAX_PDF_PAGES);
+                const chunks = [];
+                for (let i = 1; i <= pages; i++) {
+                    const page = await pdf.getPage(i);
+                    const layerText = textContentToLines(await page.getTextContent());
+                    if (layerText.replace(/\s/g, '').length >= MIN_TEXT_LAYER_CHARS) {
+                        setProgress(i / pages, `Read page ${i} of ${pages} from the PDF text layer`);
+                        chunks.push(layerText);
+                        continue;
+                    }
+                    // Scanned page: render it and run OCR.
+                    const viewport = page.getViewport({ scale: 2.5 });
+                    const canvas = document.createElement('canvas');
+                    canvas.width = Math.round(viewport.width);
+                    canvas.height = Math.round(viewport.height);
+                    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                    ctx.fillStyle = '#fff';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    await page.render({ canvasContext: ctx, viewport }).promise;
+                    enhance(canvas);
+                    chunks.push(await ocrCanvas(canvas, lang, i - 1, pages));
+                }
+                if (pdf.numPages > pages) {
+                    chunks.push(`(Only the first ${pages} of ${pdf.numPages} pages were read)`);
+                }
+                return chunks.join('\f');
+            }
+
+            async function readImage(file, lang) {
+                setProgress(0, 'Preparing image…');
+                const canvas = await imageToCanvas(file);
+                enhance(canvas);
+                return ocrCanvas(canvas, lang, 0, 1);
+            }
+
+            function showPreview(file) {
+                if (previewUrl) {
+                    URL.revokeObjectURL(previewUrl);
+                    previewUrl = null;
+                }
+                if (file.type.startsWith('image/')) {
+                    previewUrl = URL.createObjectURL(file);
+                    el.preview.src = previewUrl;
+                    el.preview.hidden = false;
+                } else {
+                    el.preview.hidden = true;
+                }
+            }
+
+            async function handleFile(file) {
+                if (!file) {
+                    return;
+                }
+                closeCamera();
+                if (busy) {
+                    return;
+                }
+                const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+                if (!isPdf && !file.type.startsWith('image/')) {
+                    setProgress(0, 'Please choose an image or a PDF.', true);
+                    return;
+                }
+                busy = true;
+                el.scan.disabled = true;
+                currentName = file.name.replace(/\.[^.]+$/, '') || 'invoice';
+                showPreview(file);
+                try {
+                    const lang = el.lang.value;
+                    const text = isPdf ? await readPdf(file, lang) : await readImage(file, lang);
+                    setProgress(1, 'Done');
+                    showResult(text);
+                } catch (error) {
+                    console.error(error);
+                    setProgress(0, `Failed: ${error.message || error}`, true);
+                } finally {
+                    busy = false;
+                    el.scan.disabled = false;
+                }
+            }
+
+            // ---------------------------------------------------------------
+            // Camera capture
+            // ---------------------------------------------------------------
+
+            const CAMERA_ORIGIN_HELP = 'Camera access needs HTTPS or localhost. A phone opening this page from a plain http:// LAN address cannot use the camera; serve it over HTTPS or upload a file instead.';
+
+            function setCameraStatus(message, isError = false) {
+                el.cameraStatus.textContent = message;
+                el.cameraStatus.classList.toggle('error', isError);
+            }
+
+            function stopStream(stream) {
+                if (!stream || typeof stream.getTracks !== 'function') {
+                    return;
+                }
+                for (const track of stream.getTracks()) {
+                    try {
+                        track.stop();
+                    } catch { /* ignore cleanup errors */ }
+                }
+            }
+
+            function stopSessionMedia(session, detach) {
+                if (!session) {
+                    return;
+                }
+                const stream = session.stream;
+                session.stream = null;
+                session.active = false;
+                session.ready = false;
+                stopStream(stream);
+                if (detach) {
+                    try {
+                        el.cameraVideo.pause();
+                    } catch { /* ignore cleanup errors */ }
+                    el.cameraVideo.srcObject = null;
+                }
+            }
+
+            function closeCamera() {
+                const session = cameraSession;
+                cameraSession = null;
+                capturing = false;
+                if (session) {
+                    stopSessionMedia(session, true);
+                } else {
+                    try {
+                        el.cameraVideo.pause();
+                    } catch { /* ignore cleanup errors */ }
+                    el.cameraVideo.srcObject = null;
+                }
+                el.capture.disabled = true;
+                el.camera.hidden = true;
+                setCameraStatus('');
+            }
+
+            function cameraErrorText(error) {
+                const name = error && error.name;
+                if (name === 'SecurityError') {
+                    return CAMERA_ORIGIN_HELP;
+                }
+                if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+                    return 'Camera permission was denied. Allow camera access in your browser settings, then try again. You can still upload a file.';
+                }
+                if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+                    return 'No camera was found. Connect a camera or upload a photo instead.';
+                }
+                if (name === 'NotReadableError' || name === 'TrackStartError' || name === 'AbortError') {
+                    return 'The camera is unavailable or in use by another app. Close it and try again, or upload a file.';
+                }
+                if (name === 'OverconstrainedError' || name === 'ConstraintNotSatisfiedError') {
+                    return 'The camera could not provide a suitable video mode. Try another camera or upload a photo.';
+                }
+                return 'Could not start the camera. Check camera permission, then try again, or upload a file.';
+            }
+
+            function isCameraReady() {
+                const session = cameraSession;
+                if (!session || !session.stream || !session.active || !session.ready || busy || capturing) {
+                    return false;
+                }
+                const video = el.cameraVideo;
+                if (!(video.videoWidth > 0) || !(video.videoHeight > 0) || video.readyState < 2) {
+                    return false;
+                }
+                const tracks = typeof session.stream.getVideoTracks === 'function'
+                    ? session.stream.getVideoTracks()
+                    : session.stream.getTracks();
+                return tracks.length > 0 && tracks.some((track) => track.readyState !== 'ended');
+            }
+
+            function updateCaptureState() {
+                el.capture.disabled = !isCameraReady();
+            }
+
+            function handleVideoState() {
+                const session = cameraSession;
+                const video = el.cameraVideo;
+                if (session && session.stream && el.cameraVideo.srcObject === session.stream
+                    && !capturing && video.videoWidth > 0 && video.videoHeight > 0 && video.readyState >= 2) {
+                    session.ready = true;
+                }
+                updateCaptureState();
+            }
+
+            function failCamera(session, error) {
+                if (cameraSession !== session) {
+                    return;
+                }
+                console.error(error);
+                cameraSession = null;
+                capturing = false;
+                stopSessionMedia(session, true);
+                el.capture.disabled = true;
+                setCameraStatus(cameraErrorText(error), true);
+            }
+
+            function failCapture(session, error) {
+                if (cameraSession !== session) {
+                    return;
+                }
+                console.error(error);
+                cameraSession = null;
+                capturing = false;
+                stopSessionMedia(session, true);
+                el.capture.disabled = true;
+                setCameraStatus('Could not prepare the captured image. Close this panel and try again, or upload a photo instead.', true);
+            }
+
+            function canvasToBlob(canvas) {
+                return new Promise((resolve, reject) => {
+                    try {
+                        canvas.toBlob((blob) => {
+                            if (blob) {
+                                resolve(blob);
+                            } else {
+                                reject(new Error('The browser could not encode the captured frame.'));
+                            }
+                        }, 'image/jpeg', 0.92);
+                    } catch (error) {
+                        reject(error);
+                    }
+                });
+            }
+
+            async function capturePhoto() {
+                if (capturing) {
+                    return;
+                }
+                if (!isCameraReady()) {
+                    if (cameraSession) {
+                        setCameraStatus('Wait for the camera preview to appear, then try again.', true);
+                    }
+                    return;
+                }
+                const session = cameraSession;
+                const video = el.cameraVideo;
+                const width = video.videoWidth;
+                const height = video.videoHeight;
+                capturing = true;
+                updateCaptureState();
+
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                if (!ctx) {
+                    failCapture(session, new Error('Canvas 2D is not supported.'));
+                    return;
+                }
+                try {
+                    // The full native camera frame; no mirroring or cropping.
+                    ctx.drawImage(video, 0, 0, width, height);
+                } catch (error) {
+                    failCapture(session, error);
+                    return;
+                }
+
+                // Release the camera as soon as the frame has been copied.
+                stopSessionMedia(session, true);
+                setCameraStatus('Preparing scan…');
+
+                let blob;
+                try {
+                    blob = await canvasToBlob(canvas);
+                } catch (error) {
+                    failCapture(session, error);
+                    return;
+                }
+                if (cameraSession !== session || !capturing) {
+                    return;
+                }
+
+                let file;
+                try {
+                    file = new File([blob], `scan-${Date.now()}.jpg`, {
+                        type: 'image/jpeg',
+                        lastModified: Date.now(),
+                    });
+                } catch (error) {
+                    failCapture(session, error);
+                    return;
+                }
+                closeCamera();
+                await handleFile(file);
+            }
+
+            async function openCamera() {
+                if (busy || cameraSession) {
+                    return;
+                }
+                el.camera.hidden = false;
+                el.capture.disabled = true;
+                setCameraStatus('Requesting camera access…');
+
+                if (window.isSecureContext === false) {
+                    setCameraStatus(CAMERA_ORIGIN_HELP, true);
+                    return;
+                }
+                if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+                    setCameraStatus('This browser does not support camera capture. Upload a photo or use a current browser instead.', true);
+                    return;
+                }
+
+                const session = { stream: null, active: false, ready: false };
+                cameraSession = session;
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        audio: false,
+                        video: {
+                            facingMode: { ideal: 'environment' },
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
+                        },
+                    });
+                    if (cameraSession !== session) {
+                        stopStream(stream);
+                        return;
+                    }
+                    session.stream = stream;
+                    el.cameraVideo.srcObject = stream;
+                    setCameraStatus('Starting the camera…');
+                    try {
+                        await el.cameraVideo.play();
+                    } catch (error) {
+                        if (cameraSession !== session) {
+                            stopSessionMedia(session, false);
+                            return;
+                        }
+                        throw error;
+                    }
+                    if (cameraSession !== session) {
+                        stopSessionMedia(session, false);
+                        return;
+                    }
+                    session.active = true;
+                    setCameraStatus('Point the camera at the invoice, fill the frame, and hold steady.');
+                    updateCaptureState();
+                } catch (error) {
+                    if (cameraSession !== session) {
+                        return;
+                    }
+                    failCamera(session, error);
+                }
+            }
+
+            // ---------------------------------------------------------------
+            // Output
+            // ---------------------------------------------------------------
+
+            let latestJson = '';
+
+            function reparse() {
+                const options = {
+                    dateOrder: el.dateOrder.value,
+                    currency: el.currency.value.trim().toUpperCase() || undefined,
+                };
+                const invoice = InvoiceParser.parseInvoice(el.text.value, options);
+                latestJson = JSON.stringify(invoice, null, 2);
+                el.json.textContent = latestJson;
+                el.warnings.replaceChildren(...invoice.warnings.map((w) => {
+                    const li = document.createElement('li');
+                    li.textContent = w;
+                    return li;
+                }));
+                el.warnings.hidden = invoice.warnings.length === 0;
+            }
+
+            function showResult(text) {
+                el.text.value = text;
+                el.result.hidden = false;
+                reparse();
+                el.result.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+
+            let timer = null;
+            el.text.addEventListener('input', () => {
+                clearTimeout(timer);
+                timer = setTimeout(reparse, 250);
+            });
+            el.dateOrder.addEventListener('change', () => !el.result.hidden && reparse());
+            el.currency.addEventListener('input', () => !el.result.hidden && reparse());
+
+            el.copy.addEventListener('click', async () => {
+                try {
+                    await navigator.clipboard.writeText(latestJson);
+                    el.copy.textContent = 'Copied';
+                } catch {
+                    el.copy.textContent = 'Copy failed';
+                }
+                setTimeout(() => {
+                    el.copy.textContent = 'Copy';
+                }, 1500);
+            });
+
+            el.download.addEventListener('click', () => {
+                let name = currentName;
+                try {
+                    name = JSON.parse(latestJson).invoiceNumber || currentName;
+                } catch { /* keep the file name */ }
+                const url = URL.createObjectURL(new Blob([latestJson], { type: 'application/json' }));
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${String(name).replace(/[^\w.-]+/g, '_')}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            });
+
+            el.sample.addEventListener('click', () => {
+                closeCamera();
+                currentName = 'sample';
+                el.status.hidden = true;
+                showResult(SAMPLE);
+            });
+
+            // ---------------------------------------------------------------
+            // Input handling
+            // ---------------------------------------------------------------
+
+            el.drop.addEventListener('click', () => {
+                closeCamera();
+                el.file.click();
+            });
+            el.drop.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    closeCamera();
+                    el.file.click();
+                }
+            });
+            el.file.addEventListener('change', () => {
+                handleFile(el.file.files[0]);
+                el.file.value = '';
+            });
+
+            el.scan.addEventListener('click', () => {
+                openCamera();
+            });
+            el.capture.addEventListener('click', () => {
+                capturePhoto();
+            });
+            el.cameraCancel.addEventListener('click', closeCamera);
+            for (const type of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'resize']) {
+                el.cameraVideo.addEventListener(type, handleVideoState);
+            }
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) {
+                    closeCamera();
+                }
+            });
+            window.addEventListener('pagehide', closeCamera);
+            window.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && !el.camera.hidden) {
+                    closeCamera();
+                }
+            });
+            el.drop.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                el.drop.classList.add('over');
+            });
+            el.drop.addEventListener('dragleave', () => el.drop.classList.remove('over'));
+            el.drop.addEventListener('drop', (e) => {
+                e.preventDefault();
+                el.drop.classList.remove('over');
+                handleFile(e.dataTransfer.files[0]);
+            });
+            window.addEventListener('paste', (e) => {
+                const file = e.clipboardData && e.clipboardData.files[0];
+                if (file) {
+                    handleFile(file);
+                }
+            });
+            // Dropping outside the box should not navigate away from the page.
+            window.addEventListener('dragover', (e) => e.preventDefault());
+            window.addEventListener('drop', (e) => e.preventDefault());
+        })();
+    </script>
+</body>
+</html>
