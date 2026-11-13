@@ -53,6 +53,34 @@ const LABEL_ONE = [
     'Powered by desty',
 ].join('\n');
 
+// Shopee sample 1 as recognized by Tesseract.js 5.1.1 from the real photo
+// (3000px, grayscale + percentile contrast) with the buyer details sanitized.
+// The printed table header lost the space in "NamaProduk" and "Qty" came out
+// as "ay"; the row number is glued to the description and the SKU is damaged.
+// Do not clean this fixture: it is the regression a tidy transcription misses.
+const ACTUAL_SHAPEE_OCR = [
+    'TT         -                             )                           S PX              ah    |',
+    'SA      S| Shopee         ND ARD    LT',
+    'Sa             N-112          |        © SPXID065736718398            RE',
+    'Penerima: Siti Contoh                       Pengirim: Flimty Official hop  i ae',
+    ':  “man (Kirim atas Jam 1siang PAKET JANGAN                        ig oo  >',
+    '|       ~ DILEMPAR) (Pagar stainless), KAB. SIDOARJO,                                 Es',
+    '. WARU, JAWA TIMUR, ID, 61256    aa                         1 or      eS',
+    '|             SR 0 0  WARU        Fr        Ra',
+    ' Berat: 600gr ~~ No.Pesanan: 2611110YKEYKNA      3% EE',
+    ' Batas Kirim: 11-11-26 COD: Rp 0   [=] by [=]  Dn   Je “ 2',
+    '                                                       :          4      Bt',
+    'RB BB     :                                  |                                       DIA EGR',
+    '1             | mi SS',
+    'DD WJ Awan VIDEO UNBOXING SEGELLAKBAN RUSAK. JANGAN TERIA [RES + +',
+    'L | No. NamaProduk                      Varian           SKU          ay (AGE... Po',
+    'Co Sa    <<       :        mame Ls A Ee SP pS       <  Pgs 7 24',
+    '1. Flimty Fiber 1 Box (16 sachet)           Blackcurrant       Edie 00008   1           -     =  =',
+    'cee wens [',
+    ': |                                           Print Count: 1 a 5 ER  5 hes',
+    '11-11-2026 07:51:04                   . Halaman: 1                  Powered by {J desty BREE EEE',
+].join('\n');
+
 // Shopee sample 2: SKU -> Varian -> Jumlah, a long wrapped pen description
 // and a wrapped SKU. Total Qty is a footer count, not a quantity source.
 const LABEL_TWO = [
@@ -243,6 +271,138 @@ test('Shopee sample 1 keeps order/tracking strings, wrapped SKU and metadata', (
     ]);
     assertNoInvoiceMoney(invoice);
     assert.deepEqual(invoice.warnings, []);
+});
+
+test('actual OCR-shaped sample 1 recovers the header, product row and raw sender', () => {
+    const invoice = parseInvoice(ACTUAL_SHAPEE_OCR);
+
+    assert.equal(invoice.merchant, 'shopee');
+    assert.equal(invoice.documentType, 'shipping_label');
+    assert.equal(invoice.vendor, 'Flimty Official hop i ae');
+    assert.equal(invoice.billTo, 'Siti Contoh');
+    assert.equal(invoice.orderId, '2611110YKEYKNA');
+    assert.equal(invoice.trackingNumber, 'SPXID065736718398');
+    assert.equal(invoice.shippingDeadline, '2026-11-11');
+    assert.equal(invoice.payment, 'COD');
+    assert.deepEqual(invoice.lineItems, [
+        {
+            description: 'Flimty Fiber 1 Box (16 sachet)',
+            quantity: 1,
+            unitPrice: null,
+            amount: null,
+            sku: 'Edie 00008',
+            variant: 'Blackcurrant',
+        },
+    ]);
+    assertNoInvoiceMoney(invoice);
+    assert.deepEqual(invoice.warnings, ['Vendor name may contain OCR noise']);
+});
+
+test('damaged Qty/NamaProduk header needs real shipping-label evidence', () => {
+    const generic = [
+        'ACME Supplies Ltd.',
+        'INVOICE',
+        'Invoice No: ACME-1',
+        'Invoice Date: 2026-02-03',
+        'L | No. NamaProduk Varian SKU ay (AGE... Po',
+        '1. Test Product Black 0123456 2 - = =',
+        'Total 200',
+    ].join('\n');
+    const genericInvoice = parseInvoice(generic);
+    assert.notEqual(genericInvoice.merchant, 'shopee');
+
+    const jne = [
+        'No.Resi: JNE0123456789',
+        'Penerima: Siti Contoh',
+        'L | No. NamaProduk Varian SKU ay (AGE... Po',
+        '1. Test Product Black 0123456 2 - = =',
+    ].join('\n');
+    assert.notEqual(parseInvoice(jne).merchant, 'shopee');
+
+    const invoiceWithMoney = [
+        'Shopee',
+        'SPX',
+        'No.Resi: SPXID06573671839B',
+        'Penerima: Siti Contoh',
+        'INVOICE',
+        'L | No. NamaProduk Varian SKU ay (AGE... Po',
+        '1. Test Product Black 0123456 2 100 200',
+        'Total 200',
+    ].join('\n');
+    assert.notEqual(parseInvoice(invoiceWithMoney).merchant, 'shopee');
+});
+
+test('actual OCR noise never becomes a product, quantity or amount', () => {
+    const invoice = parseInvoice(ACTUAL_SHAPEE_OCR);
+    const [item] = invoice.lineItems;
+
+    assert.equal(invoice.lineItems.length, 1);
+    assert.equal(item.description, 'Flimty Fiber 1 Box (16 sachet)');
+    assert.equal(item.quantity, 1);
+    assert.notEqual(item.quantity, 7);
+    assert.notEqual(item.quantity, 16);
+    assert.notEqual(item.quantity, 24);
+    assert.equal(item.unitPrice, null);
+    assert.equal(item.amount, null);
+    assert.equal(invoice.total, null);
+    assert.equal(invoice.amountDue, null);
+});
+
+test('wrapped numeric description continuations are not row indexes', () => {
+    const header = columns(['No.', 'Nama Produk', 'Varian', 'SKU', 'Qty'], WIDTHS_VARIANT_SKU_QTY);
+    const invoice = parseInvoice([
+        ...FLAT_LABEL_CONTEXT,
+        header,
+        columns(['1', 'Flimty Fiber1Box', 'Blackcurrant', '89972306008', '1'], WIDTHS_VARIANT_SKU_QTY),
+        columns(['', '16 sachet per box', '', '', ''], WIDTHS_VARIANT_SKU_QTY),
+        columns(['', '100 ml Bottle', '', '', ''], WIDTHS_VARIANT_SKU_QTY),
+    ].join('\n'));
+
+    assert.deepEqual(invoice.lineItems, [
+        {
+            description: 'Flimty Fiber1Box 16 sachet per box 100 ml Bottle',
+            quantity: 1,
+            unitPrice: null,
+            amount: null,
+            variant: 'Blackcurrant',
+            sku: '89972306008',
+        },
+    ]);
+    assert.deepEqual(invoice.warnings, []);
+});
+
+test('an aligned product row without a recognized index still starts a new item', () => {
+    const widths = [5, 40, 14, 6];
+    const header = columns(['No.', 'Nama Produk', 'SKU', 'Qty'], widths);
+    const invoice = parseInvoice([
+        ...FLAT_LABEL_CONTEXT,
+        header,
+        columns(['1', 'ProductAlpha', 'ABC123', '2'], widths),
+        columns(['', 'ProductBeta', 'DEF456', '3'], widths),
+    ].join('\n'));
+
+    assert.deepEqual(invoice.lineItems, [
+        {
+            description: 'ProductAlpha',
+            quantity: 2,
+            unitPrice: null,
+            amount: null,
+            sku: 'ABC123',
+        },
+        {
+            description: 'ProductBeta',
+            quantity: 3,
+            unitPrice: null,
+            amount: null,
+            sku: 'DEF456',
+        },
+    ]);
+    assert.deepEqual(invoice.warnings, []);
+
+    // The index-less row allowance must not revive the actual 7/24 noise line.
+    const actual = parseInvoice(ACTUAL_SHAPEE_OCR);
+    assert.equal(actual.lineItems.length, 1);
+    assert.equal(actual.lineItems[0].quantity, 1);
 });
 
 test('Shopee sample 2 handles SKU/Varian order, wrapped pen name and wrapped SKU', () => {
@@ -812,6 +972,12 @@ test('browser UMD loading registers Shopee and Tokopedia and works with either m
     assert.equal(shopee.orderId, '2611110YKEYKNA');
     assert.equal(shopee.lineItems[0].quantity, 1);
 
+    const actualShopee = parser.parseInvoice(ACTUAL_SHAPEE_OCR);
+    assert.equal(actualShopee.merchant, 'shopee');
+    assert.equal(actualShopee.lineItems.length, 1);
+    assert.equal(actualShopee.lineItems[0].description, 'Flimty Fiber 1 Box (16 sachet)');
+    assert.equal(actualShopee.lineItems[0].quantity, 1);
+
     const flattened = parser.parseInvoice([
         ...FLAT_LABEL_CONTEXT,
         'No. Nama Produk SKU Varian Qty',
@@ -835,10 +1001,14 @@ test('index.html loads both merchant adapters before the core parser', () => {
     const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
     const tokopediaScript = html.indexOf('merchants/tokopedia.js');
     const shopeeScript = html.indexOf('merchants/shopee.js');
+    const layoutScript = html.indexOf('ocr-layout.js');
     const parserScript = html.indexOf('src="invoice-parser.js"');
+    const inlineScript = html.indexOf('<script>');
     assert.ok(tokopediaScript !== -1);
     assert.ok(shopeeScript !== -1);
+    assert.ok(layoutScript !== -1);
     assert.ok(parserScript !== -1);
     assert.ok(tokopediaScript < parserScript);
     assert.ok(shopeeScript < parserScript);
+    assert.ok(layoutScript < inlineScript);
 });

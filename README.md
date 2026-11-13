@@ -109,6 +109,22 @@ structured `sku` and `variant` values rather than inventing a split, and adds a
 warning that the metadata could not be separated reliably. Rows whose column
 gaps survive continue to expose structured `sku` and `variant` values.
 
+The browser OCR asks Tesseract.js to preserve interword spaces
+(`preserve_interword_spaces: '1'`) so those printed gaps have a better chance
+of surviving. If a worker does not expose `setParameters`, OCR continues with
+the flattened-table fallback above.
+
+For a photographed Shopee label, the browser also makes at most one extra OCR
+pass restricted to the sender line. It runs only when the recognized text looks
+like a positive Shopee label match (Shopee branding, a `Pengirim` field, a
+product table and shipping-label evidence). The pass uses the sender word box
+from the first recognition, requires a valid box inside the image, and replaces
+only the visible recognized sender text before parsing. It never guesses or
+rewrites letters: if the retry fails, the original OCR text is kept. Ordinary
+invoices, PDF text layers and labels without that evidence never take the extra
+pass. This sender retry does not correct misread SKUs, order numbers or tracking
+numbers; those are reported as recognized.
+
 A document needs a product table or headerless unit-quantity rows plus Shopee
 or SPX branding or a tracking number to match. Generic invoices that merely
 mention Shopee or SPX stay with the generic parser, as does a courier-only
@@ -119,8 +135,10 @@ with glare. OCR rotation correction, deskew and glare removal are not part of
 the pipeline (images only get grayscale and contrast stretch), so a rotated or
 glared photo can produce unusable text. Straighten and re-photograph the label
 before upload when the preview text is poor. The automated tests use sanitized
-transcriptions of four observed layouts; they verify parsing of those
-transcriptions, not full recognition of every image.
+transcriptions of four observed layouts plus a raw OCR-shaped sample 1 fixture
+with the damaged header and sender text seen from a real photo. They verify
+parsing and the targeted sender replacement, not guaranteed recognition of
+every image or every SKU/tracking digit.
 
 ### Adding a merchant adapter
 
@@ -169,14 +187,16 @@ invoice-ocr/
 ├── public/
 │   ├── index.html               UI: upload, camera capture, OCR, JSON output
 │   ├── invoice-parser.js        OCR text -> invoice JSON (browser and Node)
+│   ├── ocr-layout.js            sender word-box ROI and text replacement helpers
 │   └── merchants/
 │       ├── shopee.js            Shopee shipping-label adapter
 │       └── tokopedia.js         Tokopedia invoice/shipping-receipt adapter
 └── test/
     ├── invoice-parser.test.js   parser tests
+    ├── ocr-layout.test.js       OCR layout helper tests
     ├── shopee-parser.test.js    Shopee fixtures, dispatch and UMD tests
     ├── tokopedia-parser.test.js Tokopedia fixtures, dispatch and UMD tests
-    └── scan-camera.test.js      camera lifecycle and capture tests (mocked browser)
+    └── scan-camera.test.js      camera lifecycle, capture and OCR pipeline tests
 ```
 
 `public/` is a plain static site. To host it somewhere else (Cloudflare Pages, GitHub Pages, Netlify), upload just that folder.

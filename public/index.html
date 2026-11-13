@@ -326,6 +326,7 @@
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
     <script src="merchants/tokopedia.js"></script>
     <script src="merchants/shopee.js"></script>
+    <script src="ocr-layout.js"></script>
     <script src="invoice-parser.js"></script>
     <script>
         (() => {
@@ -421,6 +422,15 @@
                 worker = await Tesseract.createWorker(lang, 1, {
                     logger: (m) => onProgress(m),
                 });
+                try {
+                    // Keep the printed column gaps in the text output. The
+                    // shipping-label table needs them to separate product,
+                    // variant, SKU and quantity cells.
+                    await worker.setParameters({ preserve_interword_spaces: '1' });
+                } catch {
+                    // Older/custom workers may not expose setParameters; the
+                    // parser still has its flattened-table fallback.
+                }
                 workerLang = lang;
                 return worker;
             }
@@ -538,6 +548,35 @@
             // Main flow
             // ---------------------------------------------------------------
 
+            /** A plain-text gate for the targeted sender re-read below. */
+            function looksLikeShopeeShippingLabel(text) {
+                const source = String(text || '');
+                return /\bShopee\b/i.test(source)
+                    && /\bPengirim\b\s*[:#,]?/i.test(source)
+                    && /\bNama\s*Produk\b/i.test(source)
+                    && (/\bSPX(?:ID[A-Z0-9]+)?\b/i.test(source)
+                        || /\bNo\.?\s*(?:Pesanan|Resi)\b/i.test(source)
+                        || /\bBatas\s+Kirim\b/i.test(source)
+                        || /\bBerat\s*:/i.test(source));
+            }
+
+            /**
+             * Re-reads only the sender line using its Tesseract word box. This
+             * is limited to Shopee labels; ordinary invoices and PDF text
+             * layers never take this second OCR pass.
+             */
+            async function recoverSenderLine(w, canvas, data) {
+                if (typeof InvoiceOcrLayout === 'undefined') {
+                    return null;
+                }
+                const rectangle = InvoiceOcrLayout.findSenderRoi(data, canvas.width, canvas.height);
+                if (!rectangle) {
+                    return null;
+                }
+                const retry = await w.recognize(canvas, { rectangle });
+                return InvoiceOcrLayout.extractSenderLine(retry.data);
+            }
+
             async function ocrCanvas(canvas, lang, step, steps) {
                 onProgress = (m) => {
                     if (m.status === 'recognizing text') {
@@ -551,7 +590,19 @@
                 };
                 const w = await getWorker(lang);
                 const { data } = await w.recognize(canvas);
-                return data.text;
+                let text = data.text;
+                if (looksLikeShopeeShippingLabel(text)) {
+                    try {
+                        const senderLine = await recoverSenderLine(w, canvas, data);
+                        if (senderLine) {
+                            text = InvoiceOcrLayout.replaceSenderLine(text, senderLine);
+                        }
+                    } catch {
+                        // Keep the full-label result when the optional retry
+                        // cannot run; the parser reports what was recognized.
+                    }
+                }
+                return text;
             }
 
             async function readPdf(file, lang) {

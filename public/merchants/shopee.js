@@ -30,7 +30,13 @@
     const ORDER_VALUE_RE = /\b(?:No\.?\s*Pesanan|Nomor\s+Pesanan|ID\s+Pesanan|Kode\s+Pesanan)\s*[:#]?\s*([A-Z0-9][A-Z0-9._-]*)/i;
     const TRACKING_LABEL_RE = /\b(?:No\.?\s*Resi|Nomor\s+Resi|Tracking(?:\s+(?:No\.?|Number|ID))?)\s*[:#]?\s*([A-Z0-9][A-Z0-9._-]*)/i;
     const TRACKING_TOKEN_RE = /\b(?:SPXID[A-Z0-9]{6,}|IDS\d{8,})\b/i;
-    const PRODUCT_HEADER_RE = /\bNama\s+Produk\b/i;
+    const PRODUCT_HEADER_RE = /\bNama\s*Produk\b/i;
+    const PRODUCT_QUANTITY_HEADING_RE = /\b(?:Qty|Jumlah|Jml)\b/i;
+    // "Qty" occasionally comes out as "ay" in a photographed label. This is
+    // only consulted for a header that also has a clear No./product/SKU
+    // order and independent shipping-label evidence, never on its own.
+    const DAMAGED_QUANTITY_HEADING_RE = /\bay\b/i;
+    const INDEX_COLUMN_RE = /(?:^|\|)\s*(?:#|No\.?)(?=\s|$)/i;
     const PRODUCT_END_RE = /^\s*(?:No\.?\s*Pesanan\b|Nomor\s+Pesanan\b|Pesan\s*:|Total\s*(?::|\bQty\b|\bJumlah\b)|WAJIB\b|Mohon\b|Catatan\b|Batas\s+(?:Kirim|Pengiriman)\b|No\.?\s*Resi\b|Penerima\b|Pengirim\b|Nama\s+Toko\b|COD\b|CASH?LESS\b|Berat\s*:|Metode\s+Pengiriman\b|Waktu\s+Pemesanan\b|Halaman\b|Powered\s+by\b|(?:SPXID|IDS)[A-Z0-9]+\s*|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\s+\d{1,2}:\d{2})/i;
     const SEPARATOR_RE = /^[\s\-_=.]+$/;
     const UNIT_PATTERN = 'pcs?|pieces?|botol|bottles?|box|boxes|pack|packs?|unit|units?|buah|lusin';
@@ -209,19 +215,97 @@
     }
 
     /**
-     * @param {string[]} lines
-     * @returns {{index: number, start: number, header: string}|null}
+     * Strong label evidence is required before a damaged "Qty" heading may be
+     * inferred. This keeps generic invoices that happen to contain the word
+     * "ay" from being parsed as shipping labels.
+     * @param {string} source
+     * @returns {boolean}
      */
-    function findProductHeader(lines) {
+    function hasStrongShippingLabelEvidence(source) {
+        const text = String(source || '');
+        if (!text.trim()) {
+            return false;
+        }
+        if (!SHOPEE_BRAND_RE.test(text)
+            && !SPX_BRAND_RE.test(text)
+            && !SPX_TRACKING_RE.test(text)) {
+            return false;
+        }
+        const lines = toLines(text);
+        return lines.some((line) => (
+            SENDER_RE.test(line)
+            || RECIPIENT_RE.test(line)
+            || STORE_RE.test(line)
+            || ORDER_LABEL_RE.test(line)
+            || /\b(?:No\.?\s*Resi|Nomor\s+Resi|Tracking(?:\s+(?:No\.?|Number|ID))?)\b/i.test(line)
+            || SHIPPING_DEADLINE_RE.test(line)
+            || DATE_ORDER_RE.test(line)
+            || /\bBerat\b/i.test(line)
+            || /\bMetode\s+Pengiriman\b/i.test(line)
+            || /\b(?:COD|Cashless|CASH?LESS)\b/i.test(line)
+        )) || TRACKING_TOKEN_RE.test(text);
+    }
+
+    /**
+     * A photographed label can lose the "Qty" heading while keeping the table
+     * structure. Accept that only when the line has an explicit row-number
+     * column, a product-name column, a later SKU/variant column and a damaged
+     * quantity token after all of them.
+     * @param {string} line
+     * @param {string} source
+     * @returns {boolean}
+     */
+    function isDamagedProductHeader(line, source) {
+        if (!DAMAGED_QUANTITY_HEADING_RE.test(line)
+            || !hasStrongShippingLabelEvidence(source)) {
+            return false;
+        }
+        const descriptionIndex = line.search(PRODUCT_HEADER_RE);
+        const indexMatch = INDEX_COLUMN_RE.exec(line);
+        const skuIndex = line.search(/\bSKU\b/i);
+        const variantIndex = line.search(/\b(?:Varian|Variasi)\b/i);
+        const lastProductColumn = Math.max(skuIndex, variantIndex);
+        const quantityMatch = DAMAGED_QUANTITY_HEADING_RE.exec(line);
+        return Boolean(indexMatch)
+            && descriptionIndex !== -1
+            && lastProductColumn > descriptionIndex
+            && Boolean(quantityMatch)
+            && quantityMatch.index > lastProductColumn;
+    }
+
+    /**
+     * @param {string[]} lines
+     * @param {string} [source]
+     * @returns {{index: number, start: number, header: string, damagedQuantity: boolean}|null}
+     */
+    function findProductHeader(lines, source = '') {
         for (let i = 0; i < lines.length; i++) {
             if (!PRODUCT_HEADER_RE.test(lines[i])) {
                 continue;
             }
-            if (/\b(?:Qty|Jumlah|Jml)\b/i.test(lines[i])) {
-                return { index: i, start: i + 1, header: lines[i] };
+            if (PRODUCT_QUANTITY_HEADING_RE.test(lines[i])) {
+                return {
+                    index: i,
+                    start: i + 1,
+                    header: lines[i],
+                    damagedQuantity: false,
+                };
             }
-            if (lines[i + 1] && /\b(?:Qty|Jumlah|Jml)\b/i.test(lines[i + 1])) {
-                return { index: i, start: i + 2, header: `${lines[i]}    ${lines[i + 1]}` };
+            if (lines[i + 1] && PRODUCT_QUANTITY_HEADING_RE.test(lines[i + 1])) {
+                return {
+                    index: i,
+                    start: i + 2,
+                    header: `${lines[i]}    ${lines[i + 1]}`,
+                    damagedQuantity: false,
+                };
+            }
+            if (isDamagedProductHeader(lines[i], source)) {
+                return {
+                    index: i,
+                    start: i + 1,
+                    header: lines[i],
+                    damagedQuantity: true,
+                };
             }
         }
         return null;
@@ -229,23 +313,30 @@
 
     /**
      * @param {string} header
+     * @param {boolean} damagedQuantity
      * @returns {{kind: string, index: number}[]}
      */
-    function findColumns(header) {
+    function findColumns(header, damagedQuantity = false) {
         /** @type {{kind: string, index: number}[]} */
         const columns = [];
         /** @type {[string, RegExp][]} */
         const definitions = [
-            ['index', /^\s*(?:#|No\.?)(?=\s|$)/i],
-            ['description', /\bNama\s+Produk\b/i],
+            ['index', INDEX_COLUMN_RE],
+            ['description', PRODUCT_HEADER_RE],
             ['sku', /\bSKU\b/i],
             ['variant', /\b(?:Varian|Variasi)\b/i],
-            ['quantity', /\b(?:Qty|Jumlah|Jml)\b/i],
+            ['quantity', PRODUCT_QUANTITY_HEADING_RE],
         ];
         for (const [kind, re] of definitions) {
             const match = re.exec(header);
             if (match) {
                 columns.push({ kind, index: match.index });
+            }
+        }
+        if (damagedQuantity && !columns.some((column) => column.kind === 'quantity')) {
+            const match = DAMAGED_QUANTITY_HEADING_RE.exec(header);
+            if (match) {
+                columns.push({ kind: 'quantity', index: match.index });
             }
         }
         columns.sort((a, b) => a.index - b.index);
@@ -532,6 +623,27 @@
         }
 
         chunks.forEach((chunk, position) => {
+            // Preserved OCR spacing can keep the row number glued to the
+            // product name ("1. Product name ..."). Split just the leading
+            // row index; the rest belongs to the description column. Only a
+            // chunk that starts in the index column can carry a glued row
+            // index: a wrapped description such as "16 sachet per box" starts
+            // in the description column and must not become a second item.
+            if (hasIndexColumn
+                && indexColumn
+                && descriptionColumn
+                && position === 0
+                && chunk.start < descriptionColumn.index) {
+                const leadingIndex = /^(\d{1,3})[.)]?\s+(?=\S)/.exec(chunk.text);
+                if (leadingIndex) {
+                    assigned.index = leadingIndex[1];
+                    const rest = chunk.text.slice(leadingIndex[0].length);
+                    if (rest) {
+                        assigned.description = joinText(assigned.description, rest);
+                    }
+                    return;
+                }
+            }
             const kind = chunkKind(chunk, position);
             if (kind === 'index') {
                 const match = /^(\d{1,3})/.exec(chunk.text);
@@ -579,19 +691,23 @@
 
     /**
      * @param {string[]} lines
+     * @param {string} [source]
      * @returns {{items: ShopeeLineItem[], warnings: string[]}}
      */
-    function extractTableItems(lines) {
-        const header = findProductHeader(lines);
+    function extractTableItems(lines, source = '') {
+        const header = findProductHeader(lines, source);
         if (!header) {
             return { items: [], warnings: [] };
         }
-        const columns = findColumns(header.header);
-        if (!columns.some((column) => column.kind === 'description')
+        const columns = findColumns(header.header, header.damagedQuantity);
+        const descriptionColumn = columns.find((column) => column.kind === 'description');
+        const indexColumn = columns.find((column) => column.kind === 'index');
+        if (!descriptionColumn
             || !columns.some((column) => column.kind === 'quantity')) {
             return { items: [], warnings: [] };
         }
         const flattened = splitGaps(header.header).length <= 1;
+        const hasIndexColumn = Boolean(indexColumn);
 
         /** @type {ShopeeLineItem[]} */
         const items = [];
@@ -615,13 +731,34 @@
                 continue;
             }
 
+            const firstTextIndex = line.search(/\S/);
+            const hasLeadingIndex = /^\s*\d{1,3}[.)]?\s+\S/.test(line);
+            // Decoration and barcode noise can sit between the header and a
+            // product row. In a gap-preserved table, real rows begin at the
+            // index/description columns; text that starts left of those
+            // columns and is not an indexed row is not a product.
+            if (!flattened
+                && descriptionColumn
+                && firstTextIndex !== -1
+                && firstTextIndex < descriptionColumn.index
+                && !hasLeadingIndex) {
+                continue;
+            }
+
             const assigned = assignChunks(line, columns, flattened);
             const hasInlineDescription = /[A-Za-z]{2}/.test(assigned.description);
-            // Flattened rows without an index or a printed quantity are still
-            // products when they carry both a description and a SKU.
-            const isRow = assigned.index !== null
-                || assigned.quantity !== null
-                || (assigned.flattened && Boolean(assigned.sku) && hasInlineDescription);
+            // With an index column, an indexed row starts a product. A row
+            // whose index was lost by OCR may still be a clearly populated,
+            // column-aligned product row when it carries description text and
+            // a quantity; accept that without letting a stray quantity in
+            // noise ("... 7 24") become a product. Headerless/flattened tables
+            // retain their existing fallback rules.
+            const isRow = hasIndexColumn
+                ? assigned.index !== null
+                    || (!flattened && hasInlineDescription && assigned.quantity !== null)
+                : assigned.index !== null
+                    || assigned.quantity !== null
+                    || (assigned.flattened && Boolean(assigned.sku) && hasInlineDescription);
 
             if (isRow) {
                 const description = cleanText([
@@ -763,10 +900,11 @@
 
     /**
      * @param {string[]} lines
+     * @param {string} [source]
      * @returns {{items: ShopeeLineItem[], warnings: string[]}}
      */
-    function extractLineItems(lines) {
-        const table = extractTableItems(lines);
+    function extractLineItems(lines, source = '') {
+        const table = extractTableItems(lines, source);
         if (table.items.length > 0) {
             return table;
         }
@@ -975,6 +1113,21 @@
     }
 
     /**
+     * A vendor ending in two one/two-letter lowercase tokens is usually
+     * trailing barcode noise ("... hop i ae"). Keep the recognized text
+     * unchanged, but warn instead of pretending it is a clean vendor name.
+     * @param {string|null} vendor
+     * @returns {boolean}
+     */
+    function vendorMayContainOcrNoise(vendor) {
+        const tokens = cleanText(vendor).split(/\s+/).filter(Boolean);
+        if (tokens.length < 3) {
+            return false;
+        }
+        return tokens.slice(-2).every((token) => /^[a-z]{1,2}$/.test(token));
+    }
+
+    /**
      * @param {string[]} lines
      * @param {'dmy'|'mdy'} dateOrder
      * @param {ShopeeHelpers} helpers
@@ -982,7 +1135,7 @@
      */
     function buildInvoice(text, options, lines, dateOrder, helpers) {
         const source = String(text || '');
-        const extracted = extractLineItems(lines);
+        const extracted = extractLineItems(lines, source);
         /** @type {ShopeeInvoice} */
         const invoice = {
             vendor: valueAfterLabel(lines, SENDER_RE) || valueAfterLabel(lines, STORE_RE),
@@ -1015,6 +1168,9 @@
 
         // Deliberately not helpers.checkInvoice: missing money, invoice
         // number and invoice date are normal for a shipping label.
+        if (invoice.vendor && vendorMayContainOcrNoise(invoice.vendor)) {
+            invoice.warnings.push('Vendor name may contain OCR noise');
+        }
         if (!invoice.orderId) {
             invoice.warnings.push('Order ID not found on shipping label');
         }
@@ -1040,7 +1196,7 @@
         }
 
         const lines = toLines(source);
-        const header = findProductHeader(lines);
+        const header = findProductHeader(lines, source);
         // A product table or headerless "N Pcs/Botol" rows are mandatory.
         // A courier waybill with only SPX/order text must stay generic.
         const hasHeaderlessProducts = lines.some((line) => (

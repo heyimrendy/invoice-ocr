@@ -7,6 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+const InvoiceOcrLayout = require('../public/ocr-layout.js');
 
 function inlineScript() {
     const match = INDEX_HTML.match(/<script>([\s\S]*?)<\/script>/);
@@ -191,7 +192,7 @@ class FakeCanvas extends FakeElement {
     }
 }
 
-function createHarness() {
+function createHarness(options = {}) {
     const elementIds = [
         'drop', 'file', 'preview', 'scan', 'camera', 'camera-video', 'camera-status',
         'capture', 'camera-cancel', 'lang', 'date-order', 'currency', 'sample', 'status',
@@ -227,7 +228,13 @@ function createHarness() {
     const ocr = {
         createWorkerCalls: [],
         recognizeCalls: [],
+        setParametersCalls: [],
+        /** @type {(params: Record<string, string>) => Promise<boolean>} */
+        setParametersImpl: async () => true,
         recognizeImpl: async () => ({ data: { text: 'Invoice No: SCAN-1\nTotal $10.00' } }),
+    };
+    const parser = {
+        calls: [],
     };
 
     const document = {
@@ -277,9 +284,13 @@ function createHarness() {
         async createWorker(lang, oem, options) {
             ocr.createWorkerCalls.push({ lang, oem, options });
             return {
-                async recognize(input) {
-                    ocr.recognizeCalls.push(input);
-                    return ocr.recognizeImpl(input);
+                async setParameters(params) {
+                    ocr.setParametersCalls.push(params);
+                    return ocr.setParametersImpl(params);
+                },
+                async recognize(input, recognizeOptions) {
+                    ocr.recognizeCalls.push({ input, options: recognizeOptions });
+                    return ocr.recognizeImpl(input, recognizeOptions);
                 },
                 async terminate() {},
             };
@@ -287,7 +298,8 @@ function createHarness() {
     };
 
     const InvoiceParser = {
-        parseInvoice() {
+        parseInvoice(text) {
+            parser.calls.push(text);
             return { warnings: [] };
         },
     };
@@ -307,6 +319,7 @@ function createHarness() {
         navigator,
         Tesseract,
         InvoiceParser,
+        InvoiceOcrLayout: options.layout,
         URL,
         Blob,
         File,
@@ -353,6 +366,7 @@ function createHarness() {
         navigator,
         media,
         ocr,
+        parser,
         created,
         bitmaps,
         objectUrls,
@@ -368,6 +382,102 @@ async function flush(rounds = 5) {
         await new Promise((resolve) => setImmediate(resolve));
     }
 }
+
+// A compact whole-image OCR result: the sender line includes the recipient,
+// low-confidence trailing decoration and the word boxes the layout helper
+// needs. The damaged "hop  i ae" value mirrors the observed Shopee photo.
+const SHOPEE_OCR_SENDER_LINE = 'Penerima: Siti Contoh        Pengirim: Flimty Official hop  i ae';
+const SHOPEE_OCR_TEXT = [
+    'Shopee',
+    'SPXID065736718398',
+    'No. Pesanan: 2611110YKEYKNA',
+    SHOPEE_OCR_SENDER_LINE,
+    'Batas Kirim: 11-11-26',
+    'L | No. NamaProduk                      Varian           SKU          ay',
+    '1. Flimty Fiber 1 Box (16 sachet)           Blackcurrant       Edie 00008   1',
+].join('\n');
+const SHOPEE_OCR_REPLACED_TEXT = SHOPEE_OCR_TEXT.replace(
+    'Pengirim: Flimty Official hop  i ae',
+    'Pengirim: Flimty Official Shop',
+);
+const SHOPEE_OCR_DATA = {
+    text: SHOPEE_OCR_TEXT,
+    blocks: [{
+        paragraphs: [{
+            lines: [{
+                text: SHOPEE_OCR_SENDER_LINE,
+                bbox: { x0: 8, y0: 26, x1: 155, y1: 40 },
+                words: [
+                    { text: 'Penerima:', bbox: { x0: 8, y0: 28, x1: 30, y1: 38 }, confidence: 95 },
+                    { text: 'Siti', bbox: { x0: 32, y0: 28, x1: 44, y1: 38 }, confidence: 95 },
+                    { text: 'Contoh', bbox: { x0: 46, y0: 28, x1: 60, y1: 38 }, confidence: 95 },
+                    { text: 'Pengirim:', bbox: { x0: 75, y0: 28, x1: 95, y1: 38 }, confidence: 95 },
+                    { text: 'Flimty', bbox: { x0: 97, y0: 28, x1: 112, y1: 38 }, confidence: 90 },
+                    { text: 'Official', bbox: { x0: 114, y0: 28, x1: 128, y1: 38 }, confidence: 90 },
+                    { text: 'hop', bbox: { x0: 130, y0: 28, x1: 139, y1: 38 }, confidence: 50 },
+                    { text: 'i', bbox: { x0: 141, y0: 28, x1: 143, y1: 38 }, confidence: 15 },
+                    { text: 'ae', bbox: { x0: 145, y0: 28, x1: 150, y1: 38 }, confidence: 5 },
+                ],
+            }],
+        }],
+    }],
+};
+const SHOPEE_SENDER_RETRY_TEXT = 'Pengirim: Flimty Official Shop';
+const SHOPEE_SENDER_RETRY_DATA = {
+    text: `${SHOPEE_SENDER_RETRY_TEXT}\n`,
+    lines: [{
+        text: SHOPEE_SENDER_RETRY_TEXT,
+        bbox: [69, 28, 137, 38],
+        words: [
+            { text: 'Pengirim:', bbox: [69, 28, 89, 38], confidence: 90 },
+            { text: 'Flimty', bbox: [91, 28, 106, 38], confidence: 90 },
+            { text: 'Official', bbox: [108, 28, 122, 38], confidence: 90 },
+            { text: 'Shop', bbox: [124, 28, 137, 38], confidence: 90 },
+        ],
+    }],
+};
+
+const SHOPEE_LOW_CONF_SENDER_TEXT = [
+    'Shopee',
+    'SPXID065736718398',
+    'No. Pesanan: 2611110YKEYKNA',
+    'Penerima: Siti Contoh        Pengirim: Toko Sinar Jaya',
+    'Batas Kirim: 11-11-26',
+    'L | No. NamaProduk                      Varian           SKU          ay',
+    '1. Product 0123456 Black 1',
+].join('\n');
+const SHOPEE_LOW_CONF_SENDER_DATA = {
+    text: SHOPEE_LOW_CONF_SENDER_TEXT,
+    blocks: [{
+        paragraphs: [{
+            lines: [{
+                text: 'Penerima: Siti Contoh        Pengirim: Toko Sinar Jaya',
+                bbox: { x0: 8, y0: 26, x1: 155, y1: 40 },
+                words: [
+                    { text: 'Penerima:', bbox: { x0: 8, y0: 28, x1: 30, y1: 38 }, confidence: 95 },
+                    { text: 'Siti', bbox: { x0: 32, y0: 28, x1: 44, y1: 38 }, confidence: 95 },
+                    { text: 'Contoh', bbox: { x0: 46, y0: 28, x1: 60, y1: 38 }, confidence: 95 },
+                    { text: 'Pengirim:', bbox: { x0: 75, y0: 28, x1: 95, y1: 38 }, confidence: 95 },
+                    { text: 'Toko', bbox: { x0: 97, y0: 28, x1: 110, y1: 38 }, confidence: 95 },
+                    { text: 'Sinar', bbox: { x0: 112, y0: 28, x1: 128, y1: 38 }, confidence: 90 },
+                    { text: 'Jaya', bbox: { x0: 130, y0: 28, x1: 143, y1: 38 }, confidence: 39 },
+                ],
+            }],
+        }],
+    }],
+};
+const SHOPEE_TRUNCATED_SENDER_RETRY_DATA = {
+    text: 'Pengirim: Toko Sinar\n',
+    lines: [{
+        text: 'Pengirim: Toko Sinar',
+        bbox: [69, 28, 128, 38],
+        words: [
+            { text: 'Pengirim:', bbox: [69, 28, 89, 38], confidence: 90 },
+            { text: 'Toko', bbox: [91, 28, 110, 38], confidence: 90 },
+            { text: 'Sinar', bbox: [112, 28, 128, 38], confidence: 90 },
+        ],
+    }],
+};
 
 test('capture uses the full native frame and feeds a named File to the existing OCR flow', async () => {
     const h = createHarness();
@@ -416,10 +526,113 @@ test('capture uses the full native frame and feeds a named File to the existing 
 
     assert.equal(h.ocr.createWorkerCalls.length, 1);
     assert.equal(h.ocr.createWorkerCalls[0].lang, 'eng+ind');
+    assert.equal(h.ocr.setParametersCalls.length, 1);
+    assert.equal(h.ocr.setParametersCalls[0].preserve_interword_spaces, '1');
     assert.equal(h.ocr.recognizeCalls.length, 1);
     assert.equal(h.elements.get('result').hidden, false);
     assert.equal(h.elements.get('status-text').textContent, 'Done');
     assert.ok(h.elements.get('json').textContent.length > 0);
+});
+
+function uploadMockImage(harness, name = 'shopee.jpg') {
+    const upload = new File(['fake image'], name, { type: 'image/jpeg' });
+    harness.elements.get('file').files = [upload];
+    harness.elements.get('file').dispatch('change');
+}
+
+test('Shopee sender re-read uses the whole OCR data, then replaces only the visible sender', async () => {
+    const h = createHarness({ layout: InvoiceOcrLayout });
+    h.ocr.recognizeImpl = async (input, options) => (
+        options && options.rectangle
+            ? { data: SHOPEE_SENDER_RETRY_DATA }
+            : { data: SHOPEE_OCR_DATA }
+    );
+
+    uploadMockImage(h);
+    await flush();
+
+    assert.equal(h.ocr.createWorkerCalls.length, 1);
+    assert.equal(h.ocr.setParametersCalls.length, 1);
+    assert.deepEqual({ ...h.ocr.setParametersCalls[0] }, { preserve_interword_spaces: '1' });
+    assert.equal(h.ocr.recognizeCalls.length, 2);
+    assert.equal(h.ocr.recognizeCalls[0].options, undefined);
+    assert.deepEqual(JSON.parse(JSON.stringify(h.ocr.recognizeCalls[1].options)), {
+        rectangle: { left: 69, top: 20, width: 76, height: 26 },
+    });
+    assert.equal(h.elements.get('text').value, SHOPEE_OCR_REPLACED_TEXT);
+    assert.equal(h.elements.get('text').value.includes('hop  i ae'), false);
+    assert.equal(h.parser.calls.at(-1), SHOPEE_OCR_REPLACED_TEXT);
+    assert.equal(h.elements.get('status-text').textContent, 'Done');
+    assert.equal(h.elements.get('result').hidden, false);
+});
+
+test('a failed optional sender re-read keeps the original OCR text', async () => {
+    const h = createHarness({ layout: InvoiceOcrLayout });
+    h.ocr.recognizeImpl = async (input, options) => {
+        if (options && options.rectangle) {
+            throw new Error('sender re-read failed');
+        }
+        return { data: SHOPEE_OCR_DATA };
+    };
+
+    uploadMockImage(h);
+    await flush();
+
+    assert.equal(h.ocr.recognizeCalls.length, 2);
+    assert.equal(h.elements.get('text').value, SHOPEE_OCR_TEXT);
+    assert.equal(h.parser.calls.at(-1), SHOPEE_OCR_TEXT);
+    assert.equal(h.elements.get('status-text').textContent, 'Done');
+    assert.equal(h.elements.get('status-text').classList.contains('error'), false);
+    assert.equal(h.elements.get('result').hidden, false);
+});
+
+test('a truncated sender retry does not delete a low-confidence legitimate suffix', async () => {
+    const h = createHarness({ layout: InvoiceOcrLayout });
+    h.ocr.recognizeImpl = async (input, options) => (
+        options && options.rectangle
+            ? { data: SHOPEE_TRUNCATED_SENDER_RETRY_DATA }
+            : { data: SHOPEE_LOW_CONF_SENDER_DATA }
+    );
+
+    uploadMockImage(h);
+    await flush();
+
+    assert.equal(h.ocr.recognizeCalls.length, 2);
+    assert.match(h.elements.get('text').value, /Pengirim: Toko Sinar Jaya/);
+    assert.equal(h.elements.get('text').value, SHOPEE_LOW_CONF_SENDER_TEXT);
+    assert.equal(h.parser.calls.at(-1), SHOPEE_LOW_CONF_SENDER_TEXT);
+    assert.equal(h.elements.get('status-text').textContent, 'Done');
+});
+
+test('ordinary invoices never take the Shopee sender re-read', async () => {
+    const h = createHarness({ layout: InvoiceOcrLayout });
+    h.ocr.recognizeImpl = async () => ({
+        data: { text: 'ACME Supplies Ltd.\nINVOICE\nInvoice No: ACME-SHOPEE-1\nShopee Gift Card 1 25.00' },
+    });
+
+    uploadMockImage(h, 'invoice.jpg');
+    await flush();
+
+    assert.equal(h.ocr.recognizeCalls.length, 1);
+    assert.equal(h.ocr.recognizeCalls[0].options, undefined);
+    assert.equal(h.elements.get('text').value, 'ACME Supplies Ltd.\nINVOICE\nInvoice No: ACME-SHOPEE-1\nShopee Gift Card 1 25.00');
+    assert.equal(h.elements.get('status-text').textContent, 'Done');
+});
+
+test('unsupported worker parameters do not fail otherwise valid OCR', async () => {
+    const h = createHarness({ layout: InvoiceOcrLayout });
+    h.ocr.setParametersImpl = async () => {
+        throw new Error('setParameters is unavailable');
+    };
+
+    uploadMockImage(h, 'invoice.jpg');
+    await flush();
+
+    assert.equal(h.ocr.setParametersCalls.length, 1);
+    assert.deepEqual({ ...h.ocr.setParametersCalls[0] }, { preserve_interword_spaces: '1' });
+    assert.equal(h.ocr.recognizeCalls.length, 1);
+    assert.equal(h.elements.get('status-text').textContent, 'Done');
+    assert.equal(h.elements.get('result').hidden, false);
 });
 
 test('capture stays disabled until video dimensions and a usable frame are ready', async () => {
