@@ -56,6 +56,72 @@ The adapter only handles the transcribed Tokopedia layouts it knows; new
 merchant layouts should get their own module rather than weakening generic
 extraction.
 
+### Shopee shipping labels
+
+The built-in Shopee adapter (`public/merchants/shopee.js`) recognises Shopee
+and SPX shipping labels. These labels are not invoices, so a matched document
+returns the common shape with `merchant: "shopee"` and
+`documentType: "shipping_label"` instead of pretending to be an invoice.
+Invoice-specific fields stay null: `invoiceNumber`, `invoiceDate`, `dueDate`,
+`subtotal`, `discount`, `taxRate`, `tax`, `shipping`, `total` and `amountDue`.
+The adapter does not run the generic invoice arithmetic or missing-invoice
+checks. It warns when the order ID or product lines cannot be found, a line
+quantity is uncertain, or flattened OCR text prevents assigning printed SKU or
+variant metadata.
+
+Labels add these fields:
+
+- `orderId` and `trackingNumber`: kept as strings, so leading zeros and long
+  order numbers survive.
+- `orderDate`: from a printed `Waktu Pemesanan`, `Tanggal Pemesanan` or
+  `Order Date` label.
+- `shippingDeadline`: from `Batas Kirim` / `Batas Pengiriman`.
+- `weight`: `{ value, unit }` with unit `g` or `kg`; `gr` and `gram` become `g`.
+- `courier` and `payment`: only reported when explicitly printed. Recognised
+  couriers include SPX, ID Express, JNE, J&T, SiCepat, AnterAja, Ninja Xpress
+  and Pos Indonesia; payment is `COD`, `Cashless` or null. `COD Cek Dulu:
+  Tidak` is not treated as COD.
+
+`orderDate` and `shippingDeadline` are independent: the print timestamp and the
+deadline are never used as fallbacks for the order date, and print timestamps
+are ignored. Ambiguous dates follow the caller's `dateOrder` option (default
+`dmy`). `invoiceDate` and `dueDate` remain null rather than duplicating label
+dates into invoice fields. `currency` is only set from an explicitly printed
+currency (for example `Rp` in a COD line) or the caller's `currency` override;
+it is null otherwise.
+
+Product lines keep `description`, `quantity`, `unitPrice: null` and
+`amount: null`. When printed, `sku`, `variant` and `unit` are added. The
+adapter handles the observed table layouts (`Nama Produk` with `Varian`/`SKU`
+and `Qty`/`Jumlah` in printed column order) and headerless lines with a
+quantity and unit such as `2 Botol` or `5 Pcs`. Wrapped descriptions, variants
+and SKUs are joined by column; a wrapped SKU keeps its digits together. Footer
+text such as `Total Qty:3` or `Total: 2` is a count, never a product quantity,
+and COD amounts such as `COD: Rp 0` are payment metadata, never totals. A label
+whose product quantity cannot be read keeps `quantity: null` and adds a
+warning.
+
+When OCR collapses the printed column gaps to single spaces, the adapter can
+still recover row boundaries and trailing quantities from the header order, but
+it cannot reliably separate multi-word variants or SKUs from the description.
+Such a row keeps the full printed product text in `description`, omits the
+structured `sku` and `variant` values rather than inventing a split, and adds a
+warning that the metadata could not be separated reliably. Rows whose column
+gaps survive continue to expose structured `sku` and `variant` values.
+
+A document needs a product table or headerless unit-quantity rows plus Shopee
+or SPX branding or a tracking number to match. Generic invoices that merely
+mention Shopee or SPX stay with the generic parser, as does a courier-only
+waybill without order/product structure.
+
+Shopee labels are often printed in small type and photographed sideways or
+with glare. OCR rotation correction, deskew and glare removal are not part of
+the pipeline (images only get grayscale and contrast stretch), so a rotated or
+glared photo can produce unusable text. Straighten and re-photograph the label
+before upload when the preview text is poor. The automated tests use sanitized
+transcriptions of four observed layouts; they verify parsing of those
+transcriptions, not full recognition of every image.
+
 ### Adding a merchant adapter
 
 The parser is a plain browser script (also CommonJS). Load an adapter before
@@ -84,8 +150,8 @@ and `checkInvoice`. Adapters must call `helpers.parseGeneric`, never the public
 `parseInvoice`, to avoid recursive dispatch. IDs must be unique; registering a
 duplicate ID throws, and matchers run in registration order with the first match
 winning. In the browser an adapter can expose itself as a global and be passed
-explicitly by the parser wrapper, as the built-in Tokopedia module does; it does
-not need to require the parser.
+explicitly by the parser wrapper, as the built-in Tokopedia and Shopee modules
+do; it does not need to require the parser.
 
 ## Test
 
@@ -104,9 +170,11 @@ invoice-ocr/
 │   ├── index.html               UI: upload, camera capture, OCR, JSON output
 │   ├── invoice-parser.js        OCR text -> invoice JSON (browser and Node)
 │   └── merchants/
+│       ├── shopee.js            Shopee shipping-label adapter
 │       └── tokopedia.js         Tokopedia invoice/shipping-receipt adapter
 └── test/
     ├── invoice-parser.test.js   parser tests
+    ├── shopee-parser.test.js    Shopee fixtures, dispatch and UMD tests
     ├── tokopedia-parser.test.js Tokopedia fixtures, dispatch and UMD tests
     └── scan-camera.test.js      camera lifecycle and capture tests (mocked browser)
 ```

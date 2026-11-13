@@ -2,19 +2,26 @@
  * Invoice text -> structured JSON.
  *
  * Works in the browser (window.InvoiceParser) and in Node (require).
- * Understands English and Indonesian invoices, and both the 1,234.56 and
- * 1.234,56 number styles.
+ * Understands English and Indonesian invoices, Tokopedia order receipts and
+ * Shopee shipping labels, and both the 1,234.56 and 1.234,56 number styles.
  */
 (function (root, factory) {
     if (typeof module === 'object' && module.exports) {
         // Node: load the built-in merchant modules without creating a cycle.
         // Merchant modules never require this file; they only receive helpers.
-        module.exports = factory(require('./merchants/tokopedia.js'));
+        module.exports = factory(
+            require('./merchants/tokopedia.js'),
+            require('./merchants/shopee.js'),
+        );
     } else {
-        // Browser: merchants/tokopedia.js must load first and expose this global.
-        /** @type {any} */ (root).InvoiceParser = factory(/** @type {any} */ (root).InvoiceParserTokopedia);
+        // Browser: merchant scripts must load first and expose these globals.
+        // Either adapter is optional; parseInvoice still works without it.
+        /** @type {any} */ (root).InvoiceParser = factory(
+            /** @type {any} */ (root).InvoiceParserTokopedia,
+            /** @type {any} */ (root).InvoiceParserShopee,
+        );
     }
-})(typeof self !== 'undefined' ? self : this, function (builtInTokopedia) {
+})(typeof self !== 'undefined' ? self : this, function (builtInTokopedia, builtInShopee) {
     'use strict';
 
     /**
@@ -23,6 +30,9 @@
      * @property {number|null} quantity
      * @property {number|null} unitPrice
      * @property {number|null} amount
+     * @property {string} [sku]        optional merchant-specific metadata
+     * @property {string} [variant]    optional merchant-specific metadata
+     * @property {string} [unit]       optional merchant-specific metadata
      */
 
     /**
@@ -47,6 +57,14 @@
      * @property {number} [insurance]        optional merchant-specific extra
      * @property {number} [serviceFee]       optional merchant-specific extra
      * @property {Voucher[]} [vouchers]      optional merchant-specific metadata
+     * @property {string} [documentType]     e.g. "shipping_label" for non-invoices
+     * @property {string|null} [orderId]     optional merchant-specific order ID
+     * @property {string|null} [trackingNumber] optional shipment tracking number
+     * @property {string|null} [orderDate]   ISO yyyy-mm-dd order date
+     * @property {string|null} [shippingDeadline] ISO yyyy-mm-dd hand-off deadline
+     * @property {{value: number, unit: string}|null} [weight] optional shipment weight
+     * @property {string|null} [courier]     optional explicitly printed courier
+     * @property {string|null} [payment]     optional explicitly printed payment method
      */
 
     /**
@@ -834,6 +852,9 @@
 
     if (builtInTokopedia) {
         registerMerchantParser(builtInTokopedia);
+    }
+    if (builtInShopee) {
+        registerMerchantParser(builtInShopee);
     }
 
     return { parseInvoice, parseAmount, findDate, detectCurrency, registerMerchantParser };
