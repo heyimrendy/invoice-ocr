@@ -140,6 +140,61 @@ with the damaged header and sender text seen from a real photo. They verify
 parsing and the targeted sender replacement, not guaranteed recognition of
 every image or every SKU/tracking digit.
 
+### Shopee order receipts (Nota Pesanan)
+
+The same Shopee adapter also recognises digital Shopee `Nota Pesanan` order
+receipts. Matching needs Shopee evidence, the receipt title, buyer or seller
+labels, a `No. Pesanan` field and the printed
+`No. Produk Variasi Harga Produk Kuantitas Subtotal` product table. A generic
+invoice that merely mentions Shopee, or a receipt title without that structure,
+stays with the generic parser.
+
+Receipt results use `documentType: "invoice_receipt"` and map:
+
+- `vendor` from `Nama Penjual` and `billTo` from `Nama Pembeli`.
+  `buyerAddress` and `buyerPhone` come from their labelled blocks; the phone is
+  kept as a string rather than converted to a number.
+- `invoiceNumber` from `No. Pesanan` (kept as a string), and `invoiceDate` from
+  `Tanggal Transaksi`. The order number is not duplicated into `orderId`.
+  `orderDate`, `dueDate` and `amountDue` stay null because the receipt does not
+  print those labels.
+- `lineItems` with the full product description, quantity, unit price, amount
+  and, when the Variasi column is populated, `variant`. SKU and unit are not
+  invented.
+- `subtotal` from `Subtotal Pesanan`, `serviceFee` from `Biaya Layanan`,
+  `discount` as the sum of the absolute voucher, Shopee-coin and payment
+  promotion amounts, and `total` from `Total Pembayaran`.
+- `currency` from the printed `Rp` amounts or the caller's currency override.
+
+Shipping and tax are deliberately not mapped. `Subtotal Pengiriman`, the
+PPN/NPWP footer, contact/address blocks outside the mapped buyer fields and
+page markers such as `1 of 2` / `End of receipt` never become line items or
+totals, so `shipping`, `tax` and `taxRate` stay null even when a shipping
+subtotal is printed. The adapter still runs the normal invoice arithmetic
+check. Sample 6 prints `Subtotal Pengiriman Rp6.500`; because that amount is
+intentionally omitted, the check truthfully reports
+`Subtotal, discount, tax and shipping give 59568, but total is 66068`. The
+adapter does not fabricate a shipping value just to silence that warning.
+
+The receipt table relies on the two-space column gaps produced by the app's
+PDF text layer. Wrapped description and variant lines are joined in column
+order, with only clear mid-word PDF breaks repaired; ordinary word boundaries
+keep their space. Text between numeric rows is buffered and assigned against
+both adjacent rows: a capitalized multi-word title can start the next product,
+while a lowercase or numeric remainder stays with the previous product. A
+short product may print its description inline on the numeric row; a lone
+cell becomes the description when no wrapped next-product description is
+present, while a lone cell after a wrapped next-product description is the
+Variasi value. When both the wrapped text and a lone inline cell look like
+product titles, or when a needed next description cannot be identified, the
+text is preserved with an explicit warning instead of silently inventing a
+variant. When OCR collapses all gaps, the middle text is kept whole instead of
+guessing which words belong to Produk or Variasi. The sanitized fixtures in
+`test/shopee-receipt-parser.test.js` cover the three observed receipts,
+inline and mixed wrapped/inline rows, long continuations, ambiguous ownership
+warnings, multi-page footers, contact boundaries, skipped fields, narrow
+matching and the browser UMD path.
+
 ### Adding a merchant adapter
 
 The parser is a plain browser script (also CommonJS). Load an adapter before
@@ -189,12 +244,13 @@ invoice-ocr/
 │   ├── invoice-parser.js        OCR text -> invoice JSON (browser and Node)
 │   ├── ocr-layout.js            sender word-box ROI and text replacement helpers
 │   └── merchants/
-│       ├── shopee.js            Shopee shipping-label adapter
+│       ├── shopee.js            Shopee shipping-label and receipt adapter
 │       └── tokopedia.js         Tokopedia invoice/shipping-receipt adapter
 └── test/
     ├── invoice-parser.test.js   parser tests
     ├── ocr-layout.test.js       OCR layout helper tests
-    ├── shopee-parser.test.js    Shopee fixtures, dispatch and UMD tests
+    ├── shopee-parser.test.js    Shopee label fixtures, dispatch and UMD tests
+    ├── shopee-receipt-parser.test.js Shopee receipt fixtures and regressions
     ├── tokopedia-parser.test.js Tokopedia fixtures, dispatch and UMD tests
     └── scan-camera.test.js      camera lifecycle, capture and OCR pipeline tests
 ```

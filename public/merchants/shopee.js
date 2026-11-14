@@ -1,5 +1,5 @@
 /**
- * Shopee shipping-label adapter.
+ * Shopee shipping-label and order-receipt adapter.
  *
  * Shopee shipping labels are not invoices: they carry an order number, a
  * tracking number, sender/recipient names and the ordered products, but no
@@ -7,6 +7,13 @@
  * Invoice shape with `documentType: 'shipping_label'`, leaves every monetary
  * field null, and deliberately does not run the generic invoice arithmetic
  * checks.
+ *
+ * Shopee "Nota Pesanan" receipts are invoices. They map to
+ * `documentType: 'invoice_receipt'` with printed product prices, subtotal,
+ * service fee, discounts, total, buyer contact details and the normal invoice
+ * arithmetic checks. Shipping and tax fields stay null: the receipt mapping
+ * deliberately does not attribute the printed shipping subtotal or the
+ * footer's NPWP/PPN note to invoice fields.
  *
  * Works in the browser (window.InvoiceParserShopee) and in Node (require).
  * It has no dependencies and must not require invoice-parser.js; the parser
@@ -67,12 +74,29 @@
     const INVOICE_MARKER_RE = /(?:^|\n)\s*(?:TAX\s+)?(?:INVOICE|FAKTUR|NOTA|RECEIPT)\b|\b(?:Invoice|Faktur)\s*(?:No|Number|Num|#)|\b(?:No|Nomor)\s*\.?\s*(?:Invoice|Faktur)\b|\b(?:Invoice\s+Date|Tanggal\s+(?:Invoice|Faktur)|Date\s+of\s+Issue)\b/i;
     const MONEY_TOTAL_RE = /^\s*(?:Grand\s+Total|Subtotal|Total(?:\s+(?:Harga|Tagihan|Amount|Amount\s+Due|Pembayaran))?|Jumlah\s+(?:Harga|Tagihan|Total)|Amount\s+Due)\s*[:.]?\s*(?:Rp\.?|IDR|USD|SGD|\$)?\s*\d[\d.,]*\s*$/i;
 
+    // Shopee "Nota Pesanan" receipts are structurally different from the
+    // shipping labels above. Matching requires the receipt title, Shopee
+    // evidence and the buyer/seller, order and product-table furniture; the
+    // Shopee word or an order number alone is never enough.
+    const RECEIPT_TITLE_RE = /^\s*Nota\s+Pesanan\s*$/i;
+    const RECEIPT_SELLER_LABEL_RE = /\bNama\s+Penjual\b\s*[:#]?\s*/i;
+    const RECEIPT_BUYER_LABEL_RE = /\bNama\s+Pembeli\b\s*[:#]?\s*/i;
+    const RECEIPT_ADDRESS_LABEL_RE = /\bAlamat\s+Pembeli\b\s*[:#]?\s*/i;
+    const RECEIPT_PHONE_LABEL_RE = /\bNo\.?\s+Handphone\s+Pembeli\b\s*[:#]?\s*/i;
+    const RECEIPT_ORDER_LABEL_RE = /\bNo\.?\s+Pesanan\b\s*[:#]?\s*/i;
+    const RECEIPT_DATE_LABEL_RE = /\bTanggal\s+Transaksi\b\s*[:#.-]?\s*/i;
+    const RECEIPT_PRODUCT_HEADER_RE = /\bNo\.?\s+Produk\s+(?:Variasi\s+)?Harga\s+Produk\s+Kuantitas\s+Subtotal\b/i;
+    const RECEIPT_TABLE_END_RE = /^(?:Subtotal\s+(?:(?:Rp\.?|IDR)\s*)?\d[\d.,]*\s*$|Total\s+Kuantitas\b|Subtotal\s+Pesanan\b|Total\s+Pembayaran\b|\d+\s+of\s+\d+\s*$|End\s+of\s+receipt\b|Continue\s+to\s+next\s+page\b)/i;
+    const RECEIPT_FIELD_STOP_RE = /^\s*(?:Nama\s+(?:Pembeli|Penjual)|Alamat\s+Pembeli|No\.?\s+Handphone\s+Pembeli|No\.?\s+Pesanan|Tanggal\s+Transaksi|Rincian\s+Pesanan)\b/i;
+    const RECEIPT_CONTACT_BOUNDARY_RE = /\s+(?=(?:Nama\s+(?:Pembeli|Penjual)|Alamat\s+Pembeli|No\.?\s+Handphone\s+Pembeli|No\.?\s+Pesanan|Tanggal\s+Transaksi|Rincian\s+Pesanan)\b)/i;
+    const RECEIPT_MONEY_RE = /-?\s*(?:Rp\.?\s*)?\d[\d.,]*/gi;
+
     /**
      * @typedef {Object} ShopeeLineItem
      * @property {string} description
      * @property {number|null} quantity
-     * @property {null} unitPrice
-     * @property {null} amount
+     * @property {number|null} unitPrice
+     * @property {number|null} amount
      * @property {string} [sku]
      * @property {string} [variant]
      * @property {string} [unit]
@@ -114,6 +138,8 @@
      * @typedef {Object} ShopeeInvoice
      * @property {string|null} vendor
      * @property {string|null} billTo
+     * @property {string|null} [buyerAddress] receipt-only buyer address
+     * @property {string|null} [buyerPhone] receipt-only buyer phone string
      * @property {string|null} invoiceNumber
      * @property {string|null} invoiceDate
      * @property {string|null} dueDate
@@ -126,9 +152,10 @@
      * @property {number|null} shipping
      * @property {number|null} total
      * @property {number|null} amountDue
+     * @property {number|null} [serviceFee] receipt-only service fee
      * @property {string[]} warnings
      * @property {string} merchant
-     * @property {'shipping_label'} documentType
+     * @property {'shipping_label'|'invoice_receipt'} documentType
      * @property {string|null} orderId
      * @property {string|null} trackingNumber
      * @property {string|null} orderDate
@@ -1113,6 +1140,693 @@
     }
 
     /**
+     * Receipt matching is intentionally stricter than label matching: the
+     * title alone, a Shopee mention or an order number must not turn a
+     * generic invoice into a receipt.
+     * @param {string} source
+     * @param {string[]} lines
+     * @returns {boolean}
+     */
+    function isReceiptDocument(source, lines) {
+        if (!SHOPEE_BRAND_RE.test(source)) {
+            return false;
+        }
+        let hasTitle = false;
+        let hasBuyer = false;
+        let hasSeller = false;
+        let hasOrder = false;
+        let hasProductHeader = false;
+        for (const line of lines) {
+            if (RECEIPT_TITLE_RE.test(line)) {
+                hasTitle = true;
+            }
+            if (RECEIPT_BUYER_LABEL_RE.test(line)) {
+                hasBuyer = true;
+            }
+            if (RECEIPT_SELLER_LABEL_RE.test(line)) {
+                hasSeller = true;
+            }
+            if (RECEIPT_ORDER_LABEL_RE.test(line)) {
+                hasOrder = true;
+            }
+            if (RECEIPT_PRODUCT_HEADER_RE.test(line)) {
+                hasProductHeader = true;
+            }
+        }
+        return hasTitle && (hasBuyer || hasSeller) && hasOrder && hasProductHeader;
+    }
+
+    /**
+     * Reads the value directly after a receipt label. Column gaps can put
+     * another labelled field on the same line ("Nama Pembeli: ... Nama
+     * Penjual: ..."), so the captured value stops at the next known field
+     * instead of treating it as part of the name.
+     * @param {string[]} lines
+     * @param {RegExp} labelRe
+     * @returns {string|null}
+     */
+    function receiptLabelValue(lines, labelRe) {
+        for (let i = 0; i < lines.length; i++) {
+            const match = labelRe.exec(lines[i]);
+            if (!match) {
+                continue;
+            }
+            const rest = lines[i].slice(match.index + match[0].length);
+            if (!RECEIPT_FIELD_STOP_RE.test(rest)) {
+                const boundary = RECEIPT_CONTACT_BOUNDARY_RE.exec(rest);
+                const value = nonEmpty(boundary ? rest.slice(0, boundary.index) : rest);
+                if (value) {
+                    return value;
+                }
+            }
+            const nextLine = lines[i + 1];
+            if (nextLine && !RECEIPT_FIELD_STOP_RE.test(nextLine)) {
+                const boundary = RECEIPT_CONTACT_BOUNDARY_RE.exec(nextLine);
+                const next = nonEmpty(boundary ? nextLine.slice(0, boundary.index) : nextLine);
+                if (next) {
+                    return next;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The receipt prints the buyer address as a label followed by wrapped
+     * address lines. Keep the whole block, joining the printed lines with
+     * spaces, until the next buyer field.
+     * @param {string[]} lines
+     * @returns {string|null}
+     */
+    function findReceiptAddress(lines) {
+        for (let i = 0; i < lines.length; i++) {
+            const match = RECEIPT_ADDRESS_LABEL_RE.exec(lines[i]);
+            if (!match) {
+                continue;
+            }
+            /** @type {string[]} */
+            const parts = [];
+            const rest = lines[i].slice(match.index + match[0].length);
+            const inlineBoundary = RECEIPT_CONTACT_BOUNDARY_RE.exec(rest);
+            const inline = nonEmpty(inlineBoundary ? rest.slice(0, inlineBoundary.index) : rest);
+            if (inline) {
+                parts.push(inline);
+            }
+            for (let j = i + 1; j < lines.length; j++) {
+                if (RECEIPT_FIELD_STOP_RE.test(lines[j])
+                    || RECEIPT_TITLE_RE.test(lines[j])
+                    || RECEIPT_TABLE_END_RE.test(lines[j])) {
+                    break;
+                }
+                const part = nonEmpty(lines[j]);
+                if (part) {
+                    parts.push(part);
+                }
+            }
+            const address = nonEmpty(parts.join(' '));
+            if (address) {
+                return address;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param {string} value
+     * @returns {boolean}
+     */
+    function isReceiptOrderNumber(value) {
+        return /^[A-Z0-9][A-Z0-9._-]{5,}$/i.test(value)
+            && /\d/.test(value)
+            && !/^(?:Tanggal|Metode|Jasa|Saldo|Instant|Reguler|Same|No)$/i.test(value);
+    }
+
+    /**
+     * The order number is printed on the value row below the "No. Pesanan"
+     * label row in the PDF text layer. It stays a string so long or
+     * leading-zero numbers are not rounded.
+     * @param {string[]} lines
+     * @returns {string|null}
+     */
+    function findReceiptOrderNumber(lines) {
+        for (let i = 0; i < lines.length; i++) {
+            const match = RECEIPT_ORDER_LABEL_RE.exec(lines[i]);
+            if (!match) {
+                continue;
+            }
+            const rest = lines[i].slice(match.index + match[0].length);
+            const inline = /^\s*([A-Z0-9][A-Z0-9._-]{3,})\b/i.exec(rest);
+            if (inline) {
+                const candidate = inline[1].replace(/[.,;:]+$/, '');
+                if (isReceiptOrderNumber(candidate)) {
+                    return candidate;
+                }
+            }
+            const nextLine = lines[i + 1];
+            if (!nextLine) {
+                continue;
+            }
+            const chunks = splitGaps(nextLine.trim());
+            const first = cleanText(chunks.length > 0 ? chunks[0].text : nextLine);
+            const candidate = cleanText(first.split(/\s+/)[0]).replace(/[.,;:]+$/, '');
+            if (isReceiptOrderNumber(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param {string[]} lines
+     * @param {'dmy'|'mdy'} dateOrder
+     * @param {ShopeeHelpers} helpers
+     * @returns {string|null}
+     */
+    function findReceiptInvoiceDate(lines, dateOrder, helpers) {
+        for (let i = 0; i < lines.length; i++) {
+            const match = RECEIPT_DATE_LABEL_RE.exec(lines[i]);
+            if (!match) {
+                continue;
+            }
+            const rest = lines[i].slice(match.index + match[0].length);
+            const onLine = helpers.findDate(rest, dateOrder);
+            if (onLine) {
+                return onLine.iso;
+            }
+            // The date is printed on the value row below the column labels;
+            // the order number precedes it in that row.
+            const next = lines[i + 1] ? helpers.findDate(lines[i + 1], dateOrder) : null;
+            if (next) {
+                return next.iso;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param {string} line
+     * @param {ShopeeHelpers} helpers
+     * @returns {number|null}
+     */
+    function receiptLastAmount(line, helpers) {
+        let value = null;
+        for (const match of String(line).matchAll(RECEIPT_MONEY_RE)) {
+            const parsed = helpers.parseAmount(match[0]);
+            if (parsed !== null) {
+                value = parsed;
+            }
+        }
+        return value;
+    }
+
+    /**
+     * @param {string} token
+     * @param {ShopeeHelpers} helpers
+     * @returns {boolean}
+     */
+    function isReceiptMoneyToken(token, helpers) {
+        return /^-?\s*(?:Rp\.?\s*)?\d[\d.,]*$/i.test(token)
+            && helpers.parseAmount(token) !== null;
+    }
+
+    /**
+     * The cells between the row number and Harga Produk are Produk and the
+     * optional Variasi. A single cell is ambiguous in isolation: when a
+     * description was already collected from wrapped lines above the row it
+     * is the Variasi value (the observed sample 6 rows), while a short
+     * product printed on the same baseline has no pending description and
+     * therefore uses that cell as its description. With two or more cells the
+     * first is the inline description and the rest are the variant.
+     * @param {string[]} cells
+     * @param {boolean} hasPendingDescription
+     * @returns {{description: string, variant: string}}
+     */
+    function assignReceiptRowText(cells, hasPendingDescription) {
+        const values = cells.map(cleanText).filter(Boolean);
+        if (values.length === 0) {
+            return { description: '', variant: '' };
+        }
+        if (values.length === 1) {
+            return hasPendingDescription
+                ? { description: '', variant: values[0] }
+                : { description: values[0], variant: '' };
+        }
+        return {
+            description: values[0],
+            variant: cleanText(values.slice(1).join(' ')),
+        };
+    }
+
+    /**
+     * A wrapped product description normally starts with a capitalized title
+     * word and contains more than one token. This is deliberately structural
+     * rather than a character-count rule: a long lowercase continuation stays
+     * a continuation, while a capitalized multi-word title can start the next
+     * product. One-word titles and unusual casings remain uncertain.
+     * @param {string} text
+     * @returns {boolean}
+     */
+    function looksLikeReceiptProductTitle(text) {
+        const value = cleanText(text);
+        if (!value) {
+            return false;
+        }
+        const tokens = value.split(/\s+/).filter(Boolean);
+        if (tokens.length < 2) {
+            return false;
+        }
+        return /^[A-Z][A-Za-z0-9'&()./-]+$/.test(tokens[0])
+            && /[A-Za-z]{2,}/.test(value);
+    }
+
+    /**
+     * @param {{description: string, variant: string}} parts
+     * @param {ShopeeLineItem|null} lastItem
+     * @returns {boolean}
+     */
+    function looksLikeReceiptProductStart(parts, lastItem) {
+        const text = cleanText(parts.description);
+        if (!text) {
+            return false;
+        }
+        if (lastItem && joinsWithoutSpace(lastItem.description, text)) {
+            return false;
+        }
+        return looksLikeReceiptProductTitle(text);
+    }
+
+    /**
+     * A value that looks like a printed variant/size cell rather than a
+     * product title. Used only to recognize an otherwise ambiguous lone cell.
+     * @param {string} text
+     * @returns {boolean}
+     */
+    function looksLikeReceiptVariantValue(text) {
+        const value = cleanText(text);
+        if (!value) {
+            return false;
+        }
+        if (/^\d+(?:[.,]\d+)?$/.test(value)) {
+            return true;
+        }
+        return /^\d+(?:[.,]\d+)?\s*(?:kg|g|gr|gram|ml|l|liter|cm|mm|m|meter|pcs?|pieces?|pack|box|botol|unit|buah|lusin)$/i.test(value);
+    }
+
+    /**
+     * @param {ShopeeLineItem} item
+     * @param {{description: string, variant: string}} parts
+     * @returns {void}
+     */
+    function appendReceiptContinuation(item, parts) {
+        if (parts.description) {
+            item.description = joinWrappedText(item.description, parts.description);
+        }
+        if (parts.variant) {
+            item.variant = joinWrappedText(item.variant || '', parts.variant);
+        }
+    }
+
+    /**
+     * Text between two numeric rows can contain the previous product's wrapped
+     * remainder followed by the next product's wrapped description. The first
+     * line that looks like a product title starts the pending suffix; earlier
+     * lines remain continuations of the previous product.
+     * @param {{description: string, variant: string}[]} buffer
+     * @param {ShopeeLineItem|null} lastItem
+     * @returns {{continuation: {description: string, variant: string}[], pending: {description: string, variant: string}[]}}
+     */
+    function splitReceiptSegment(buffer, lastItem) {
+        for (let i = 0; i < buffer.length; i++) {
+            if (looksLikeReceiptProductStart(buffer[i], lastItem)) {
+                return {
+                    continuation: buffer.slice(0, i),
+                    pending: buffer.slice(i),
+                };
+            }
+        }
+        return {
+            continuation: buffer,
+            pending: [],
+        };
+    }
+
+    /**
+     * Product rows put the row number, optional inline description, optional
+     * variant, unit price, quantity and amount in printed columns. The text
+     * layer preserves two spaces between those columns, so the columns can be
+     * read from the right. The cells before Harga Produk are returned
+     * unassigned because ownership depends on the wrapped text around the row.
+     * @param {string} line
+     * @param {ShopeeHelpers} helpers
+     * @returns {{cells: string[], quantity: number, unitPrice: number, amount: number}|null}
+     */
+    function parseReceiptProductRow(line, helpers) {
+        const chunks = splitGaps(line.trim());
+        if (chunks.length >= 4
+            && /^\d{1,3}$/.test(chunks[0].text)
+            && /^\d{1,4}$/.test(chunks[chunks.length - 2].text)
+            && isReceiptMoneyToken(chunks[chunks.length - 3].text, helpers)
+            && isReceiptMoneyToken(chunks[chunks.length - 1].text, helpers)) {
+            const quantity = Number(chunks[chunks.length - 2].text);
+            const unitPrice = helpers.parseAmount(chunks[chunks.length - 3].text);
+            const amount = helpers.parseAmount(chunks[chunks.length - 1].text);
+            if (quantity > 0 && unitPrice !== null && amount !== null) {
+                return {
+                    cells: chunks.slice(1, chunks.length - 3)
+                        .map((chunk) => cleanText(chunk.text))
+                        .filter(Boolean),
+                    quantity,
+                    unitPrice,
+                    amount,
+                };
+            }
+        }
+
+        // If OCR collapses the printed column gaps, preserve the same row
+        // structure by reading the rightmost quantity/price/amount tokens.
+        // The middle text cannot be split into Produk/Variasi columns without
+        // guessing, so it is returned as one ambiguous cell.
+        const flattened = /^\s*(\d{1,3})\s+(?:(.*?)\s+)?(-?(?:Rp\.?\s*)?\d[\d.,]*)\s+(\d{1,4})\s+(-?(?:Rp\.?\s*)?\d[\d.,]*)\s*$/i.exec(line);
+        if (!flattened) {
+            return null;
+        }
+        const quantity = Number(flattened[4]);
+        const unitPrice = helpers.parseAmount(flattened[3]);
+        const amount = helpers.parseAmount(flattened[5]);
+        if (!Number.isInteger(quantity) || quantity <= 0 || unitPrice === null || amount === null) {
+            return null;
+        }
+        const cell = cleanText(flattened[2] || '');
+        return {
+            cells: cell ? [cell] : [],
+            quantity,
+            unitPrice,
+            amount,
+        };
+    }
+
+    /**
+     * A wrapped description/table line carries the product text first and an
+     * optional variant in the next printed column.
+     * @param {string} line
+     * @returns {{description: string, variant: string}|null}
+     */
+    function parseReceiptDescriptionLine(line) {
+        const chunks = splitGaps(line.trim());
+        if (chunks.length === 0) {
+            return null;
+        }
+        return {
+            description: cleanText(chunks[0].text),
+            variant: cleanText(chunks.slice(1).map((chunk) => chunk.text).join(' ')),
+        };
+    }
+
+    /**
+     * @param {string} text
+     * @returns {string}
+     */
+    function lastWord(text) {
+        const match = /(\S+)$/.exec(cleanText(text));
+        return match ? match[1] : '';
+    }
+
+    /**
+     * @param {string} text
+     * @returns {string}
+     */
+    function firstWord(text) {
+        const match = /^(\S+)/.exec(cleanText(text));
+        return match ? match[1] : '';
+    }
+
+    /**
+     * A PDF text-layer cell can break in the middle of a word. Repair only
+     * clear cases: a one-character letter/digit split ("8" + "K"), a single
+     * lowercase continuation ("Kentan" + "g"), or a one/two-letter fragment
+     * followed by a lowercase word ("Uk" + "uran"). Anything else keeps a
+     * space, so ordinary wrapped words are not concatenated blindly.
+     * @param {string} left
+     * @param {string} right
+     * @returns {boolean}
+     */
+    function joinsWithoutSpace(left, right) {
+        const last = lastWord(left);
+        const first = firstWord(right);
+        if (!last || !first || !/[A-Za-z0-9]$/.test(last) || !/^[A-Za-z0-9]/.test(first)) {
+            return false;
+        }
+        if (/^\d$/.test(last) && /^[A-Za-z]$/.test(first)) {
+            return true;
+        }
+        if (/^[a-z]$/.test(first) && /[A-Za-z]$/.test(last)) {
+            return true;
+        }
+        return /^[A-Za-z]{1,2}$/.test(last) && /^[a-z]/.test(first);
+    }
+
+    /**
+     * @param {string} left
+     * @param {string} right
+     * @returns {string}
+     */
+    function joinWrappedText(left, right) {
+        const a = cleanText(left);
+        const b = cleanText(right);
+        if (!a) {
+            return b;
+        }
+        if (!b) {
+            return a;
+        }
+        return cleanText(joinsWithoutSpace(a, b) ? `${a}${b}` : `${a} ${b}`);
+    }
+
+    /**
+     * @param {string[]} lines
+     * @param {ShopeeHelpers} helpers
+     * @returns {{items: ShopeeLineItem[], warnings: string[]}}
+     */
+    function extractReceiptLineItems(lines, helpers) {
+        const headerIndex = lines.findIndex((line) => RECEIPT_PRODUCT_HEADER_RE.test(line));
+        if (headerIndex === -1) {
+            return { items: [], warnings: [] };
+        }
+        let end = lines.length;
+        for (let i = headerIndex + 1; i < lines.length; i++) {
+            if (RECEIPT_TABLE_END_RE.test(lines[i])) {
+                end = i;
+                break;
+            }
+        }
+
+        /** @type {ShopeeLineItem[]} */
+        const items = [];
+        /** @type {string[]} */
+        const warnings = [];
+        /** @type {{description: string, variant: string}[]} */
+        let buffer = [];
+        /** @type {ShopeeLineItem|null} */
+        let lastItem = null;
+
+        for (let i = headerIndex + 1; i < end; i++) {
+            const line = lines[i].trim();
+            if (!line || SEPARATOR_RE.test(line) || RECEIPT_PRODUCT_HEADER_RE.test(line)) {
+                continue;
+            }
+            const row = parseReceiptProductRow(line, helpers);
+            if (row) {
+                /** @type {string[]} */
+                let rowCells = row.cells;
+                /** @type {{description: string, variant: string}[]} */
+                let continuation = [];
+                /** @type {{description: string, variant: string}[]} */
+                let pending = buffer;
+                if (lastItem) {
+                    if (row.cells.length >= 2) {
+                        // The row carries its own description and variant, so
+                        // all preceding text belongs to the previous product.
+                        continuation = buffer;
+                        pending = [];
+                    } else if (row.cells.length === 1) {
+                        const split = splitReceiptSegment(buffer, lastItem);
+                        continuation = split.continuation;
+                        pending = split.pending;
+                        if (pending.length === 0
+                            && buffer.length > 0
+                            && looksLikeReceiptVariantValue(row.cells[0])) {
+                            warnings.push('Receipt product text could not be split reliably '
+                                + 'between adjacent products; the inline value was kept as a product description');
+                        } else if (pending.length > 0
+                            && looksLikeReceiptProductTitle(row.cells[0])) {
+                            // Both the wrapped suffix and the lone inline cell
+                            // look like product text. Keep both as description
+                            // text instead of pretending one is a variant.
+                            warnings.push('Receipt product text could not be split reliably '
+                                + 'between adjacent products; the wrapped and inline text were kept together '
+                                + 'as a product description');
+                            pending = pending.concat({ description: row.cells[0], variant: '' });
+                            rowCells = [];
+                        }
+                    } else {
+                        const split = splitReceiptSegment(buffer, lastItem);
+                        continuation = split.continuation;
+                        pending = split.pending;
+                        if (pending.length === 0 && buffer.length > 0) {
+                            // The next row needs a description but every
+                            // intervening line looked like a continuation.
+                            // Keep the text with the next product and warn
+                            // instead of silently dropping or renaming it.
+                            warnings.push('Receipt product text could not be split reliably '
+                                + 'between adjacent products; it was kept with the next product');
+                            continuation = [];
+                            pending = buffer;
+                        }
+                    }
+                }
+                if (lastItem) {
+                    for (const part of continuation) {
+                        appendReceiptContinuation(lastItem, part);
+                    }
+                }
+
+                let description = '';
+                for (const part of pending) {
+                    description = joinWrappedText(description, part.description);
+                }
+                let variant = '';
+                for (const part of pending) {
+                    variant = joinWrappedText(variant, part.variant);
+                }
+                const assigned = assignReceiptRowText(rowCells, Boolean(description));
+                if (assigned.description) {
+                    description = joinWrappedText(description, assigned.description);
+                }
+                if (assigned.variant) {
+                    variant = joinWrappedText(variant, assigned.variant);
+                }
+                buffer = [];
+                if (!description) {
+                    warnings.push(`Receipt product row at line ${i + 1} has no description; row skipped`);
+                    lastItem = null;
+                    continue;
+                }
+                /** @type {ShopeeLineItem} */
+                const item = {
+                    description,
+                    quantity: row.quantity,
+                    unitPrice: row.unitPrice,
+                    amount: row.amount,
+                };
+                if (variant) {
+                    item.variant = variant;
+                }
+                items.push(item);
+                lastItem = item;
+                continue;
+            }
+
+            const parts = parseReceiptDescriptionLine(line);
+            if (!parts || (!parts.description && !parts.variant)) {
+                continue;
+            }
+            buffer.push(parts);
+        }
+
+        // Text after the last numeric row is the wrapped remainder of the last
+        // product; there is no following row that could own it.
+        if (lastItem) {
+            for (const part of buffer) {
+                appendReceiptContinuation(lastItem, part);
+            }
+        }
+
+        return { items, warnings };
+    }
+
+    /**
+     * @param {string[]} lines
+     * @param {ShopeeHelpers} helpers
+     * @returns {{subtotal: number|null, serviceFee: number|null, discount: number|null, total: number|null}}
+     */
+    function extractReceiptTotals(lines, helpers) {
+        let subtotal = null;
+        let serviceFee = null;
+        let discount = null;
+        let total = null;
+        for (const line of lines) {
+            const value = receiptLastAmount(line, helpers);
+            if (value === null) {
+                continue;
+            }
+            if (subtotal === null && /^\s*Subtotal\s+Pesanan\b/i.test(line)) {
+                subtotal = value;
+                continue;
+            }
+            if (serviceFee === null && /^\s*Biaya\s+Layanan\b/i.test(line)) {
+                serviceFee = value;
+                continue;
+            }
+            if (total === null && /^\s*Total\s+Pembayaran\b/i.test(line)) {
+                total = value;
+                continue;
+            }
+            if (/^\s*(?:Diskon\s+Voucher(?:\s+Shopee)?|\d+\s+Koin\s+Shopee\s+Ditukarkan|Promosi\s+Metode\s+Pembayaran)\b/i.test(line)) {
+                discount = (discount || 0) + Math.abs(value);
+            }
+        }
+        return { subtotal, serviceFee, discount, total };
+    }
+
+    /**
+     * @param {string} text
+     * @param {ShopeeParseOptions} options
+     * @param {string[]} lines
+     * @param {'dmy'|'mdy'} dateOrder
+     * @param {ShopeeHelpers} helpers
+     * @returns {ShopeeInvoice}
+     */
+    function buildReceiptInvoice(text, options, lines, dateOrder, helpers) {
+        const source = String(text || '');
+        const extracted = extractReceiptLineItems(lines, helpers);
+        const totals = extractReceiptTotals(lines, helpers);
+        /** @type {ShopeeInvoice} */
+        const invoice = {
+            vendor: receiptLabelValue(lines, RECEIPT_SELLER_LABEL_RE),
+            billTo: receiptLabelValue(lines, RECEIPT_BUYER_LABEL_RE),
+            buyerAddress: findReceiptAddress(lines),
+            buyerPhone: receiptLabelValue(lines, RECEIPT_PHONE_LABEL_RE),
+            invoiceNumber: findReceiptOrderNumber(lines),
+            invoiceDate: findReceiptInvoiceDate(lines, dateOrder, helpers),
+            dueDate: null,
+            currency: typeof options.currency === 'string' && options.currency.trim()
+                ? options.currency.trim().toUpperCase()
+                : helpers.detectCurrency(source) || null,
+            lineItems: extracted.items,
+            subtotal: totals.subtotal,
+            discount: totals.discount,
+            taxRate: null,
+            tax: null,
+            shipping: null,
+            total: totals.total,
+            amountDue: null,
+            serviceFee: totals.serviceFee,
+            warnings: extracted.warnings.slice(),
+            merchant: ID,
+            documentType: 'invoice_receipt',
+            orderId: null,
+            trackingNumber: null,
+            orderDate: null,
+            shippingDeadline: null,
+            weight: null,
+            courier: null,
+            payment: null,
+        };
+        invoice.warnings.push(...helpers.checkInvoice(invoice));
+        return invoice;
+    }
+
+    /**
      * A vendor ending in two one/two-letter lowercase tokens is usually
      * trailing barcode noise ("... hop i ae"). Keep the recognized text
      * unchanged, but warn instead of pretending it is a clean vendor name.
@@ -1196,6 +1910,13 @@
         }
 
         const lines = toLines(source);
+        // Receipts are matched before the label rules. They deliberately do
+        // not go through the generic invoice-marker/money exclusion below:
+        // "Nota Pesanan" and its printed totals are expected receipt evidence.
+        if (isReceiptDocument(source, lines)) {
+            return true;
+        }
+
         const header = findProductHeader(lines, source);
         // A product table or headerless "N Pcs/Botol" rows are mandatory.
         // A courier waybill with only SPX/order text must stay generic.
@@ -1251,7 +1972,9 @@
         const source = String(text || '');
         const lines = toLines(source);
         const dateOrder = options.dateOrder === 'mdy' ? 'mdy' : 'dmy';
-        return buildInvoice(source, options, lines, dateOrder, helpers);
+        return isReceiptDocument(source, lines)
+            ? buildReceiptInvoice(source, options, lines, dateOrder, helpers)
+            : buildInvoice(source, options, lines, dateOrder, helpers);
     }
 
     return { id: ID, matches, parse };

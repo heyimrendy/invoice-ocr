@@ -3,7 +3,8 @@
  *
  * Works in the browser (window.InvoiceParser) and in Node (require).
  * Understands English and Indonesian invoices, Tokopedia order receipts and
- * Shopee shipping labels, and both the 1,234.56 and 1.234,56 number styles.
+ * Shopee shipping labels and order receipts, and both the 1,234.56 and
+ * 1.234,56 number styles.
  */
 (function (root, factory) {
     if (typeof module === 'object' && module.exports) {
@@ -39,6 +40,8 @@
      * @typedef {Object} Invoice
      * @property {string|null} vendor
      * @property {string|null} billTo
+     * @property {string|null} [buyerAddress] optional receipt-only buyer address
+     * @property {string|null} [buyerPhone] optional receipt-only buyer phone string
      * @property {string|null} invoiceNumber
      * @property {string|null} invoiceDate  ISO yyyy-mm-dd
      * @property {string|null} dueDate      ISO yyyy-mm-dd
@@ -57,7 +60,7 @@
      * @property {number} [insurance]        optional merchant-specific extra
      * @property {number} [serviceFee]       optional merchant-specific extra
      * @property {Voucher[]} [vouchers]      optional merchant-specific metadata
-     * @property {string} [documentType]     e.g. "shipping_label" for non-invoices
+     * @property {string} [documentType]     e.g. "shipping_label" or "invoice_receipt"
      * @property {string|null} [orderId]     optional merchant-specific order ID
      * @property {string|null} [trackingNumber] optional shipment tracking number
      * @property {string|null} [orderDate]   ISO yyyy-mm-dd order date
